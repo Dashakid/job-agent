@@ -9,6 +9,42 @@ yourself**.
 > run ends with prepared browser tabs waiting for you to read, correct and
 > send.
 
+## Quick start
+
+```bash
+# 1. Install
+git clone https://github.com/Dashakid/job-agent.git && cd job-agent
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt && playwright install chromium
+
+# 2. Tell it about you (then edit both files; put your résumé PDF in this folder)
+cp profile.example.json profile.json
+cp candidate_context.example.md candidate_context.md
+
+# 3. Find jobs, then prepare them
+python scraper.py all "Data Engineer" "Python"
+python batch_runner.py --concurrency 1
+```
+
+A Chromium window opens with one tab per job, each filled in as far as the
+agent could go. The terminal lists what still needs you. Check every tab,
+finish any remaining questions, and click submit yourself.
+
+A run's output looks like this:
+
+```text
+=== Preparing: Backend Engineer, Platform ===
+  [ok] Filled 'first_name'
+  [ok] Uploaded resume: resume.pdf (confirmed on page)
+  [ok] Answered 'Will you now or in the future require sponsors...' -> No
+  [ok] Declined to self-identify on 3 EEO topic(s)
+  [review] 1 required field(s) still need you:
+      - What are your salary expectations?
+  [review] Ready for manual completion and submission
+```
+
+The rest of this README covers each step in detail.
+
 ## What it does
 
 | Step | Script | What happens |
@@ -31,8 +67,14 @@ anything either.
 
 - **No auto-submit.** Neither the application runner nor the outreach agent
   sends anything.
-- **Sensitive questions are left for you:** salary, criminal history, legal
-  attestations and consent checkboxes.
+- **Sensitive questions are left for you:** salary, criminal history, and
+  anything certifying a fact about you (such as citizenship or export-control
+  status).
+- **Agreements are opt-in.** Privacy consents and "I have read the agreement"
+  boxes are only ticked if you turn on `acknowledge_privacy_statements` or
+  `auto_accept_legal_acknowledgements` in your profile.
+- **Résumé uploads are verified.** The agent checks that the site actually
+  shows your file. If it doesn't, you get a warning to attach it yourself.
 - **EEO / demographic questions** (gender, race, veteran, disability) are
   answered only if `eeo_response` is
   `"decline"`, and then only with the form's own "decline to answer" option.
@@ -48,7 +90,7 @@ anything either.
 Requires Python 3.10+.
 
 ```bash
-git clone https://github.com/<you>/job-agent.git
+git clone https://github.com/Dashakid/job-agent.git
 cd job-agent
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt

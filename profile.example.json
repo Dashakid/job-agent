@@ -47,7 +47,7 @@
     "agentic_workflows": "Yes",
     "rag_vector_search": "No"
   },
-  "acknowledge_privacy_statements": true,
+  "acknowledge_privacy_statements": false,
   "job_source": "Company Website",
   "phone_country": "United States",
   "state": "Texas",
