@@ -1,0 +1,16 @@
+[
+  {
+    "company": "DataPulse AI",
+    "website": "https://datapulse.example.com",
+    "contact_url": "https://www.linkedin.com/in/example-cto-datapulse",
+    "tech_stack": "Python, FastAPI, PostgreSQL, Docker, AWS",
+    "context": "Early-stage B2B data pipeline and analytics platform scaling up backend throughput."
+  },
+  {
+    "company": "LedgerFlow",
+    "website": "https://ledgerflow.example.com",
+    "contact_url": "https://x.com/example_founder",
+    "tech_stack": "Python, Django, PostgreSQL, Celery",
+    "context": "Automated financial reconciliation tools for modern accounting teams."
+  }
+]

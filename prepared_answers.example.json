@@ -1,0 +1,6 @@
+[
+  {
+    "pattern": "why\\s+(are\\s+you\\s+)?interested\\s+in\\s+this\\s+role|why\\s+do\\s+you\\s+want\\s+(to\\s+work|this\\s+job)",
+    "answer": "Replace this with your own answer. The pattern is a case-insensitive regex matched against each question's label; the first matching rule fills the field."
+  }
+]

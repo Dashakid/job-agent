@@ -1,0 +1,59 @@
+{
+  "first_name": "Jane",
+  "last_name": "Doe",
+  "email": "jane.doe@example.com",
+  "phone": "+1 555-555-0100",
+  "location_city": "Austin, TX",
+  "preferred_name": "Jane",
+  "country": "United States of America",
+  "years_professional_software_engineering": 2,
+  "python_rating": 4,
+  "ruby_on_rails_rating": 0,
+  "resume_path": "./resume.pdf",
+  "cover_letter_path": "./cover_letter.pdf",
+  "linkedin_url": "https://www.linkedin.com/in/your-handle",
+  "github_url": "https://github.com/your-handle",
+  "portfolio_url": "https://your-handle.github.io/",
+  "authorized_to_work_us": true,
+  "requires_sponsorship": false,
+  "previously_worked_at_gitlab": false,
+  "employment_restrictions": false,
+  "school": "University of Texas at Austin",
+  "school_fallbacks": [
+    "Other"
+  ],
+  "degree_preferences": [
+    "Bachelor's Degree",
+    "Other"
+  ],
+  "eeo_response": "decline",
+  "previously_employed_at_target": false,
+  "plans_to_work_remotely": true,
+  "recruiting_messages_opt_in": false,
+  "current_job_title": "Software Engineer",
+  "current_employer": "Example Corp",
+  "city_state": "Austin, TX",
+  "work_countries": [
+    "US"
+  ],
+  "work_rights_text": "United States",
+  "preferred_contact_methods": [
+    "Email"
+  ],
+  "timezone": "CST",
+  "skill_answers": {
+    "python_or_typescript": "Yes",
+    "infrastructure_as_code": "No",
+    "agentic_workflows": "Yes",
+    "rag_vector_search": "No"
+  },
+  "acknowledge_privacy_statements": true,
+  "job_source": "Company Website",
+  "phone_country": "United States",
+  "state": "Texas",
+  "sanctioned_country_ties": false,
+  "start_availability": "I can start two weeks after accepting an offer.",
+  "open_to_in_office": null,
+  "willing_to_relocate": null,
+  "auto_accept_legal_acknowledgements": false
+}

@@ -1,0 +1,16 @@
+# Core: browser automation and job-board scraping
+playwright>=1.45
+playwright-stealth>=2.0
+requests>=2.31
+
+# AI drafting and failure diagnosis (optional at runtime; needs GEMINI_API_KEY)
+google-genai>=1.0
+
+# Google Sheets tracker and Gmail status sync (optional at runtime)
+gspread>=6.0
+google-auth>=2.30
+google-auth-oauthlib>=1.2
+google-api-python-client>=2.100
+
+# Tests
+pytest>=8.0

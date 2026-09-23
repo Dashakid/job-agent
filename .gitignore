@@ -1,0 +1,28 @@
+# --- Personal data: never commit ---
+profile.json
+candidate_context.md
+prepared_answers.json
+*.pdf
+applications_log.json
+applications_log.csv
+self_heal_log.json
+failures/
+queues/
+make_pdf.py
+SESSION_STATE.md
+
+# --- Credentials ---
+service_account.json
+credentials.json
+token.json
+.env
+
+# --- Python / tooling ---
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+.idea/
+.vscode/
+.DS_Store

@@ -1,0 +1,21 @@
+<!doctype html><html><head><title>Backend Engineer - Example Co</title></head><body>
+<h1>Apply for Backend Engineer</h1>
+<form id="application_form" onsubmit="window.__submitted=true; return false;">
+  <label for="first_name">First Name *</label><input id="first_name" name="job_application[first_name]" required>
+  <label for="last_name">Last Name *</label><input id="last_name" name="job_application[last_name]" required>
+  <label for="email">Email *</label><input id="email" name="job_application[email]" type="email" required>
+  <label for="phone">Phone</label><input id="phone" name="job_application[phone]" type="tel">
+  <label for="resume">Resume/CV *</label><input id="resume" name="resume" type="file" required><span id="resume_name"></span>
+  <script>resume.addEventListener("change", () => { resume_name.textContent = resume.files[0] ? resume.files[0].name : ""; });</script>
+  <label for="linkedin">LinkedIn Profile</label><input id="linkedin" name="linkedin_url" aria-label="LinkedIn Profile">
+  <label for="auth">Are you legally authorized to work in the United States? *</label>
+  <select id="auth" name="auth" required><option value="">Select...</option><option>Yes</option><option>No</option></select>
+  <label for="spons">Will you now or in the future require sponsorship for employment visa status? *</label>
+  <select id="spons" name="spons" required><option value="">Select...</option><option>Yes</option><option>No</option></select>
+  <label for="why">Why are you interested in this role? *</label><textarea id="why" name="why" required></textarea>
+  <label for="loc_sponsor">If you're not authorized to work at the stated location, what sponsorship would you require for the role?</label>
+  <input id="loc_sponsor" name="loc_sponsor" aria-label="If you're not authorized to work at the stated location, what sponsorship would you require for the role?">
+  <label for="salary">What are your salary expectations?</label><input id="salary" name="salary_expectations">
+  <label><input type="checkbox" id="consent" name="consent" required> I certify that the information provided is true and complete *</label>
+  <button type="submit" id="submit">Submit Application</button>
+</form></body></html>
