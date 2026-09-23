@@ -82,8 +82,13 @@ anything either.
 - **No invented facts.** AI drafts may only use what is written in
   `candidate_context.md`. If there isn't enough information, the field is left
   empty.
-- **Bot challenges** (CAPTCHA, Cloudflare) are never bypassed. The tab is
-  flagged and left open for you to clear.
+- **CAPTCHAs are never bypassed or solved by the agent.** If a Cloudflare
+  check or a CAPTCHA puzzle blocks a page, the runner brings that tab to the
+  front, asks you to solve it, and carries on filling once it clears (it waits
+  5 minutes by default; change this with `--challenge-timeout SECONDS`). An
+  "I'm not a robot" checkbox inside a form doesn't block filling; the review
+  step reminds you to tick it before submitting. The invisible reCAPTCHA badge
+  most application pages carry is ignored.
 
 ## Setup
 

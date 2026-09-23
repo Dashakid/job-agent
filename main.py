@@ -24,6 +24,7 @@ from playwright.sync_api import Page, sync_playwright
 
 from candidate_answers import draft_answers, is_eligible_open_question
 from application_history import load_handled_urls
+from bot_challenge import BLOCKING_CHALLENGE_JS
 
 try:
     from playwright_stealth import Stealth
@@ -533,33 +534,15 @@ def log_application(url: str, company: str, status: str = "Pending Review") -> N
 # service. Instead we detect the challenge and pause for a human to solve it
 # in the visible (headed) browser window, since a person is already there to
 # review the application before submission.
-CHALLENGE_TITLE_MARKERS = ["just a moment", "attention required", "access denied", "are you human"]
-CHALLENGE_SELECTORS = [
-    "iframe[src*='challenges.cloudflare.com']",
-    "#cf-challenge-running",
-    "div.cf-turnstile",
-    "iframe[title*='recaptcha' i]",
-    "iframe[src*='hcaptcha.com']",
-    "div.h-captcha",
-]
-
-
 def detect_bot_challenge(page: Page) -> bool:
-    """Return True if the page looks like a Cloudflare/CAPTCHA challenge wall."""
+    """
+    Return True if a challenge is blocking the page (see bot_challenge.py).
+    The invisible reCAPTCHA badge and in-form checkboxes do not count.
+    """
     try:
-        title = (page.title() or "").strip().lower()
+        return bool(page.evaluate(BLOCKING_CHALLENGE_JS))
     except Exception:
-        title = ""
-    if any(marker in title for marker in CHALLENGE_TITLE_MARKERS):
-        return True
-
-    for selector in CHALLENGE_SELECTORS:
-        try:
-            if page.locator(selector).first.count() > 0:
-                return True
-        except Exception:
-            continue
-    return False
+        return False
 
 
 def wait_for_human_to_clear_challenge(page: Page, max_checks: int = 1) -> None:

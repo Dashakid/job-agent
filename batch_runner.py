@@ -18,6 +18,7 @@ from playwright.async_api import Browser, BrowserContext, Locator, Page, async_p
 
 from candidate_answers import draft_answers, is_eligible_open_question
 from application_history import filter_unhandled
+from bot_challenge import BLOCKING_CHALLENGE_JS, FORM_CAPTCHA_JS
 
 BASE_DIR = Path(__file__).resolve().parent
 DEFAULT_QUEUE_PATH = BASE_DIR / "queues" / "pending_jobs.json"
@@ -116,15 +117,9 @@ FIELD_SELECTORS = {
     ],
 }
 
-CHALLENGE_MARKERS = ("just a moment", "attention required", "access denied", "are you human")
-CHALLENGE_SELECTORS = (
-    "iframe[src*='challenges.cloudflare.com']",
-    "#cf-challenge-running",
-    "div.cf-turnstile",
-    "iframe[title*='recaptcha' i]",
-    "iframe[src*='hcaptcha.com']",
-    "div.h-captcha",
-)
+# How long a tab waits for the human to clear a blocking challenge before the
+# job is given up. Set from --challenge-timeout.
+CHALLENGE_TIMEOUT_SECONDS = 300
 
 _json_lock = asyncio.Lock()
 
@@ -306,19 +301,58 @@ async def self_heal_action(
     raise RuntimeError(f"{action_name} failed after {max_retries} attempts: {last_error}")
 
 
-async def detect_challenge(page: Page) -> bool:
+async def detect_challenge(page: Page) -> str:
+    """Return why the page is blocked by a bot challenge, or "" if it is not."""
     try:
-        if any(marker in (await page.title()).lower() for marker in CHALLENGE_MARKERS):
-            return True
+        return await page.evaluate(BLOCKING_CHALLENGE_JS) or ""
+    except Exception:
+        # Mid-navigation (e.g. Cloudflare redirecting after a pass).
+        return ""
+
+
+async def wait_for_challenge_clear(page: Page, title: str, timeout_s: float | None = None) -> bool:
+    """
+    If a blocking challenge is showing, bring the tab forward and wait for the
+    human to solve it. Returns True once the page is clear (or never was
+    blocked), False if the timeout ran out. Never interacts with the challenge.
+    """
+    reason = await detect_challenge(page)
+    if not reason:
+        return True
+    timeout_s = CHALLENGE_TIMEOUT_SECONDS if timeout_s is None else timeout_s
+    try:
+        await page.bring_to_front()
     except Exception:
         pass
-    for selector in CHALLENGE_SELECTORS:
-        try:
-            if await page.locator(selector).count():
-                return True
-        except Exception:
-            continue
+    print(f"  [action] {reason} in tab '{title}'. Please solve it in the browser; "
+          f"filling continues automatically (waiting up to {int(timeout_s)}s).")
+    deadline = asyncio.get_running_loop().time() + timeout_s
+    next_reminder = asyncio.get_running_loop().time() + 60
+    while asyncio.get_running_loop().time() < deadline:
+        await asyncio.sleep(2)
+        if not await detect_challenge(page):
+            print(f"  [ok] Challenge cleared in '{title}'; continuing.")
+            # Let the real page load after the challenge redirects.
+            try:
+                await page.wait_for_load_state("domcontentloaded", timeout=15000)
+            except Exception:
+                pass
+            return True
+        if asyncio.get_running_loop().time() >= next_reminder:
+            print(f"  [action] Still waiting on the challenge in '{title}'...")
+            next_reminder += 60
     return False
+
+
+async def report_form_captcha(page: Page) -> str:
+    """Remind the human about a CAPTCHA widget they must tick before submitting."""
+    try:
+        widget = await page.evaluate(FORM_CAPTCHA_JS) or ""
+    except Exception:
+        return ""
+    if widget:
+        print(f"  [review] This form has a {widget}; tick it yourself before submitting.")
+    return widget
 
 
 # Apply-link wording varies by ATS and by companies that skin their own
@@ -1980,11 +2014,15 @@ async def prepare_job(
         print(f"\n=== Preparing: {title} ===")
         try:
             await page.goto(url, wait_until="domcontentloaded", timeout=45000)
-            if await detect_challenge(page):
-                raise RuntimeError("Bot challenge detected; manual intervention required")
+            if not await wait_for_challenge_clear(page, title):
+                raise RuntimeError("Bot challenge was not cleared in time; tab left open for you")
             await self_heal_action(
                 page, "Open application form", lambda: open_application_form(page), url
             )
+            # Opening the form can navigate to another host (an apply page or
+            # an embedded ATS), which may put up its own challenge.
+            if not await wait_for_challenge_clear(page, title):
+                raise RuntimeError("Bot challenge was not cleared in time; tab left open for you")
             await self_heal_action(
                 page, "Fill contact fields", lambda: fill_contact_fields(page, profile), url
             )
@@ -2060,6 +2098,7 @@ async def prepare_job(
             )
             await report_multi_step_form(page)
             await report_unfilled_required_fields(page)
+            await report_form_captcha(page)
             await log_status(job, "success")
             await log_status(job, "review_gate_reached")
             finished = True
@@ -2129,6 +2168,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--concurrency", type=int, default=6, help="Maximum simultaneous tabs"
     )
     parser.add_argument(
+        "--challenge-timeout", type=float, default=CHALLENGE_TIMEOUT_SECONDS,
+        help="Seconds to wait for you to solve a CAPTCHA/Cloudflare check before "
+             "giving up on that job (default: %(default)s)",
+    )
+    parser.add_argument(
         "--ignore-history",
         action="store_true",
         help="Re-prepare jobs already handled in a previous run (e.g. after form-filling improvements)",
@@ -2140,6 +2184,8 @@ def main() -> int:
     args = build_parser().parse_args()
     if not 1 <= args.concurrency <= 20:
         raise SystemExit("--concurrency must be between 1 and 20")
+    global CHALLENGE_TIMEOUT_SECONDS
+    CHALLENGE_TIMEOUT_SECONDS = max(0.0, args.challenge_timeout)
     try:
         asyncio.run(run_batch(args.file, args.concurrency, args.ignore_history))
     except KeyboardInterrupt:
