@@ -640,6 +640,8 @@ async def fill_known_profile_questions(page: Page, profile: dict) -> None:
     if country:
         await select_combobox_answer(page, r"currently live in this location", "Yes")
         await select_combobox_answer(page, r"current country of residence", country)
+        if NORTH_AMERICA_COUNTRY_RE.search(country):
+            await select_combobox_answer(page, r"located in the US or Canada", "Yes")
 
     restrictions = profile.get("employment_restrictions")
     if restrictions is not None:
@@ -1633,6 +1635,8 @@ async def answer_logistics_questions(page: Page, profile: dict) -> int:
 
     return answered
 
+# "Are you located in the US or Canada?" is Yes only for residents of either.
+NORTH_AMERICA_COUNTRY_RE = re.compile(r"^(united\s+states|usa?\b|canada)", re.IGNORECASE)
 # Short free-text questions answerable straight from profile.json.
 TEXT_QUESTION_RULES = [
     (re.compile(r"current\s+or\s+previous\s+job\s+title|current\s+job\s+title|"
@@ -1642,6 +1646,8 @@ TEXT_QUESTION_RULES = [
                 r"name\s+of\s+your\s+current", re.IGNORECASE),
      "current_employer"),
     (re.compile(r"city\s+and\s+state|what\s+city.*reside|city/state", re.IGNORECASE), "city_state"),
+    (re.compile(r"primary\s+(programming\s+)?language|main\s+(programming\s+)?language",
+                re.IGNORECASE), "primary_language"),
     # Some ATS name these question_<id> with the text only in the label, so
     # selector matching on id/name/aria-label finds nothing.
     (re.compile(r"preferred\s+(first\s+)?name", re.IGNORECASE), "preferred_name"),

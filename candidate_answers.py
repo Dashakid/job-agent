@@ -1,13 +1,16 @@
 """Grounded drafting for open-ended job application questions."""
 
 import json
-import os
 import re
 from pathlib import Path
 
+import llm
+
 BASE_DIR = Path(__file__).resolve().parent
 CANDIDATE_CONTEXT_PATH = BASE_DIR / "candidate_context.md"
-GEMINI_MODEL = "gemini-2.5-flash"
+# Pre-written answers to recurring prompts; matched before any model call.
+PREPARED_ANSWERS_PATH = BASE_DIR / "prepared_answers.json"
+GEMINI_MODEL = llm.GEMINI_MODEL
 
 ESSAY_KEYWORDS = re.compile(
     r"\b(why|describe|tell us|tell me|experience|interest|motivated|motivation|"
@@ -44,13 +47,53 @@ def is_eligible_open_question(label: str, tag_name: str, input_type: str) -> boo
     return bool(ESSAY_KEYWORDS.search(normalized))
 
 
+def load_prepared_answers() -> list[tuple[re.Pattern, str]]:
+    """Load the applicant's pre-written answers as (compiled pattern, answer) pairs."""
+    try:
+        rules = json.loads(PREPARED_ANSWERS_PATH.read_text(encoding="utf-8"))
+    except (FileNotFoundError, ValueError):
+        return []
+    if not isinstance(rules, list):
+        return []
+    compiled = []
+    for rule in rules:
+        pattern, answer = rule.get("pattern", ""), rule.get("answer", "")
+        if pattern and answer:
+            compiled.append((re.compile(pattern, re.IGNORECASE), answer))
+    return compiled
+
+
+def match_prepared_answer(question: str, rules: list[tuple[re.Pattern, str]]) -> str | None:
+    """Return the first prepared answer whose pattern matches the question label."""
+    for pattern, answer in rules:
+        if pattern.search(question):
+            return answer
+    return None
+
+
 def draft_answers(questions: list[str], job_context: str = "") -> list[str | None]:
-    """Draft grounded answers in question order, returning None when facts are insufficient."""
+    """Answer questions in order: prepared answers first, then grounded model drafts.
+
+    Returns None for any question with neither a prepared answer nor a grounded draft.
+    """
     if not questions:
         return []
-    api_key = os.environ.get("GEMINI_API_KEY")
-    if not api_key:
-        print("  [draft] GEMINI_API_KEY is not set; open-ended fields remain for review.")
+    rules = load_prepared_answers()
+    results: list[str | None] = [match_prepared_answer(q, rules) for q in questions]
+    pending = [index for index, answer in enumerate(results) if answer is None]
+    if not pending:
+        return results
+    drafted = _draft_with_llm([questions[index] for index in pending], job_context)
+    for index, answer in zip(pending, drafted):
+        results[index] = answer
+    return results
+
+
+def _draft_with_llm(questions: list[str], job_context: str) -> list[str | None]:
+    """Draft grounded answers in question order, returning None when facts are insufficient."""
+    if not llm.available_providers():
+        print("  [draft] No drafting key set (GROQ_API_KEY or GEMINI_API_KEY); "
+              "open-ended fields remain for review.")
         return [None] * len(questions)
 
     try:
@@ -81,16 +124,12 @@ sponsorship, non-compete, or other sensitive/disclosure questions.
 Do not include markdown. These are drafts and will be reviewed before submission."""
 
     try:
-        from google import genai
-
-        client = genai.Client(api_key=api_key)
-        response = client.models.generate_content(model=GEMINI_MODEL, contents=prompt)
-        raw_text = (response.text or "").strip()
+        raw_text = llm.generate(prompt)
         raw_text = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw_text)
         answers = json.loads(raw_text)
         if not isinstance(answers, list) or len(answers) != len(questions):
-            raise ValueError("Gemini returned an unexpected answer count")
+            raise ValueError("drafting model returned an unexpected answer count")
         return [answer.strip() if isinstance(answer, str) and answer.strip() else None for answer in answers]
     except Exception as error:
-        print(f"  [draft] Gemini answer drafting unavailable: {error}")
+        print(f"  [draft] Answer drafting unavailable: {error}")
         return [None] * len(questions)

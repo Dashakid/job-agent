@@ -33,6 +33,7 @@
   "current_job_title": "Software Engineer",
   "current_employer": "Example Corp",
   "city_state": "Austin, TX",
+  "primary_language": "Python (FastAPI)",
   "work_countries": [
     "US"
   ],

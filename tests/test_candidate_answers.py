@@ -67,6 +67,7 @@ class CandidateAnswerTests(unittest.TestCase):
             patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}, clear=True),
             patch.dict("sys.modules", {"google": fake_google, "google.genai": fake_genai}),
             patch.object(candidate_answers, "load_candidate_context", return_value="Trusted facts"),
+            patch.object(candidate_answers, "PREPARED_ANSWERS_PATH", Path("/nonexistent.json")),
         ):
             answers = candidate_answers.draft_answers(
                 ["Why this role?", "Unsupported fact?"], "Example job"
@@ -76,6 +77,42 @@ class CandidateAnswerTests(unittest.TestCase):
         self.assertEqual(captured["model"], candidate_answers.GEMINI_MODEL)
         self.assertEqual(captured["api_key"], "test-key")
         self.assertIn("Trusted facts", captured["contents"])
+
+
+class PreparedAnswerTests(unittest.TestCase):
+    def _with_rules(self, rules):
+        tmpdir = tempfile.TemporaryDirectory(dir=candidate_answers.BASE_DIR)
+        self.addCleanup(tmpdir.cleanup)
+        path = Path(tmpdir.name) / "prepared_answers.json"
+        path.write_text(json.dumps(rules), encoding="utf-8")
+        patcher = patch.object(candidate_answers, "PREPARED_ANSWERS_PATH", path)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_prepared_answer_fills_without_gemini_key(self):
+        self._with_rules([{"pattern": r"open\s+source", "answer": "https://github.com/example"}])
+        with patch.dict(os.environ, {}, clear=True):
+            answers = candidate_answers.draft_answers(
+                ["Please share links of any open source projects*", "Why this role?"]
+            )
+        self.assertEqual(answers, ["https://github.com/example", None])
+
+    def test_only_unmatched_questions_reach_gemini(self):
+        self._with_rules([{"pattern": r"primary\s+language", "answer": "Python"}])
+        with patch.object(
+            candidate_answers, "_draft_with_llm", return_value=["Drafted"]
+        ) as drafter:
+            answers = candidate_answers.draft_answers(
+                ["Why this role?", "What is your primary language?"], "ctx"
+            )
+        drafter.assert_called_once_with(["Why this role?"], "ctx")
+        self.assertEqual(answers, ["Drafted", "Python"])
+
+    def test_missing_or_malformed_file_yields_no_rules(self):
+        with patch.object(candidate_answers, "PREPARED_ANSWERS_PATH", Path("/nonexistent.json")):
+            self.assertEqual(candidate_answers.load_prepared_answers(), [])
+        self._with_rules({"not": "a list"})
+        self.assertEqual(candidate_answers.load_prepared_answers(), [])
 
 
 if __name__ == "__main__":
