@@ -225,6 +225,7 @@ def build_parser() -> argparse.ArgumentParser:
         "outreach-review", help="Approve, edit, or skip saved outreach drafts at the terminal"
     )
     outreach_review_parser.add_argument("--output", type=Path, default=DEFAULT_DB_PATH)
+    outreach_review_parser.add_argument("--targets", type=Path, default=DEFAULT_TARGETS_PATH)
     outreach_review_parser.set_defaults(func=cmd_outreach_review)
 
     outreach_mark_sent_parser = subparsers.add_parser(

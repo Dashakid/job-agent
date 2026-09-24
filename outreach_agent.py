@@ -145,6 +145,43 @@ VALID_STATES = {
     STATE_DISCOVERED, STATE_DRAFTED, STATE_APPROVED, STATE_SKIPPED, STATE_REVIEWED,
     STATE_SENT, STATE_ERROR, STATE_AUTH_REQUIRED, STATE_NO_COMPOSER_FOUND,
 }
+# States in which the approved message has already been put in front of the
+# human in a browser tab. A rerun reopens the tab with the same message; it
+# never redrafts.
+TAB_OPENED_STATES = (STATE_REVIEWED, STATE_AUTH_REQUIRED, STATE_NO_COMPOSER_FOUND)
+_AFTER_APPROVAL = {*TAB_OPENED_STATES, STATE_SENT}
+
+# The only legal next status for each contact's latest status (None = never
+# seen). log_state enforces this, so nothing reaches "sent" without an
+# approval, and a sent or skipped contact can never be reprocessed. "error"
+# may follow any non-final state and is retried by rediscovering the contact.
+ALLOWED_TRANSITIONS: dict[str | None, set[str]] = {
+    None: {STATE_DISCOVERED},
+    STATE_DISCOVERED: {STATE_DISCOVERED, STATE_DRAFTED},
+    STATE_DRAFTED: {STATE_APPROVED, STATE_SKIPPED},
+    STATE_APPROVED: _AFTER_APPROVAL,
+    STATE_REVIEWED: _AFTER_APPROVAL,
+    STATE_AUTH_REQUIRED: _AFTER_APPROVAL,
+    STATE_NO_COMPOSER_FOUND: _AFTER_APPROVAL,
+    STATE_ERROR: {STATE_DISCOVERED},
+    STATE_SENT: set(),
+    STATE_SKIPPED: set(),
+}
+FINAL_STATES = {state for state, allowed in ALLOWED_TRANSITIONS.items() if not allowed}
+
+
+class InvalidTransitionError(ValueError):
+    """A status write that would skip a step, replay one, or reopen a finished contact."""
+
+
+def check_transition(current: str | None, new: str) -> None:
+    if new == STATE_ERROR and current not in FINAL_STATES:
+        return
+    if new not in ALLOWED_TRANSITIONS.get(current, set()):
+        raise InvalidTransitionError(
+            f"Cannot move from {current or 'no record'!r} to {new!r}"
+            + (f" ({current} is final)" if current in FINAL_STATES else "")
+        )
 
 # Enforced between successive per-target actions (page loads, Gemini calls)
 # so a large target list cannot hammer company sites, LinkedIn, or the Gemini
@@ -295,6 +332,61 @@ def strip_placeholder_greeting(message: str) -> str:
     """Drop a greeting to a placeholder contact and re-capitalize the first word."""
     stripped = _PLACEHOLDER_GREETING_RE.sub("", message, count=1)
     return stripped[:1].upper() + stripped[1:] if stripped else stripped
+
+
+# First path segments on x.com that are app pages, not somebody's handle.
+_X_RESERVED_PATHS = {"home", "search", "explore", "i", "intent", "share", "hashtag", "messages"}
+
+
+def contact_handle_problem(contact: dict) -> str:
+    """Why this LinkedIn/X contact can't be approved, or '' if it points at one person's profile.
+
+    Company pages have no one to message, so drafts for them may be edited or
+    skipped but never approved. Email and contact-form contacts are not checked.
+    """
+    channel = (contact.get("channel") or "").lower()
+    if channel not in ("linkedin", "x"):
+        return ""
+    url = (contact.get("profile_url") or "").strip()
+    if not url:
+        return f"no {channel} profile URL for this contact"
+    parsed = urlparse(url)
+    path = [part for part in parsed.path.split("/") if part]
+    host = parsed.netloc.lower()
+    if channel == "linkedin":
+        if "linkedin.com" not in host or len(path) < 2 or path[0] != "in":
+            return f"{url} is not a personal LinkedIn profile (expected linkedin.com/in/<name>)"
+    elif ("x.com" not in host and "twitter.com" not in host) or len(path) != 1 \
+            or path[0].lower() in _X_RESERVED_PATHS:
+        return f"{url} is not a personal X profile (expected x.com/<handle>)"
+    return ""
+
+
+# Whole numbers and decimals, with or without thousands separators. The
+# lookarounds keep "5000" from matching inside "A5000B" or a longer number.
+_NUMBER_RE = re.compile(r"(?<![\w.])\d[\d,]*(?:\.\d+)?(?![\d])")
+# Small counts ("two weeks", "3 steps") and the prompt's own "15-minute call"
+# are not claims about the company, so they never need a source.
+ALWAYS_GROUNDED_NUMBERS = {str(n) for n in range(11)} | {"15"}
+
+
+def _numbers_in(text: str) -> set[str]:
+    return {match.group(0).replace(",", "").rstrip(".") for match in _NUMBER_RE.finditer(text or "")}
+
+
+def ungrounded_numbers(message: str, *sources: str) -> list[str]:
+    """Numbers in the draft that appear in none of the sources, in first-seen order.
+
+    Numbers are compared whole ("6" is not grounded by "600"), so a figure
+    Gemini invents or alters shows up here.
+    """
+    known = ALWAYS_GROUNDED_NUMBERS.union(*(_numbers_in(source) for source in sources))
+    found: list[str] = []
+    for match in _NUMBER_RE.finditer(message or ""):
+        number = match.group(0).replace(",", "").rstrip(".")
+        if number not in known and number not in found:
+            found.append(number)
+    return found
 
 
 def normalize_target_record(raw: dict) -> dict:
@@ -556,6 +648,18 @@ def find_cover_letter_language(message: str) -> list[str]:
     return [phrase for phrase in COVER_LETTER_PHRASES if phrase in lowered]
 
 
+def draft_problems(message: str, *sources: str) -> list[str]:
+    """Human-readable reasons a draft should be regenerated; empty if it is clean."""
+    problems = []
+    banned = find_cover_letter_language(message or "")
+    if banned:
+        problems.append("banned cover-letter phrasing " + ", ".join(f'"{p}"' for p in banned))
+    numbers = ungrounded_numbers(message or "", *sources)
+    if numbers:
+        problems.append("numbers found in no source: " + ", ".join(numbers))
+    return problems
+
+
 def build_outreach_prompt(
     company: str,
     contact: dict,
@@ -679,17 +783,20 @@ def draft_outreach_message(
         from google import genai
 
         client = genai.Client(api_key=api_key)
+        sources = (site_excerpt, company_context, candidate_context_text)
         message = _generate_text(client, prompt)
-        banned = find_cover_letter_language(message)
-        if message and banned:
-            print(f"  [draft] Cover-letter phrasing {banned}; regenerating once.")
+        problems = draft_problems(message, *sources)
+        if message and problems:
+            print(f"  [draft] {'; '.join(problems)}. Regenerating once.")
             message = _generate_text(
                 client,
-                prompt + "\n\nYour previous draft used banned cover-letter phrasing: "
-                + ", ".join(f'"{p}"' for p in banned) + ". Rewrite it without that phrasing.",
+                prompt + "\n\nYour previous draft had these problems: " + "; ".join(problems)
+                + ". Rewrite it without them. Only use numbers that literally appear in the "
+                "website text, company context, or candidate context.",
             )
-            if find_cover_letter_language(message):
-                print("  [draft] Draft still has cover-letter phrasing; fix it during review.")
+            remaining = draft_problems(message, *sources)
+            if remaining:
+                print(f"  [draft] Still: {'; '.join(remaining)}. Fix it during review.")
         message = strip_hook_label(message)
         if message and not contact_first_name(contact):
             message = strip_placeholder_greeting(message)
@@ -718,13 +825,18 @@ def init_db(db_path: Path) -> None:
                 url TEXT,
                 message TEXT,
                 status TEXT NOT NULL,
-                hook TEXT NOT NULL DEFAULT ''
+                hook TEXT NOT NULL DEFAULT '',
+                source_text TEXT NOT NULL DEFAULT ''
             )
             """
         )
         columns = {row[1] for row in conn.execute("PRAGMA table_info(outreach_events)")}
-        if "hook" not in columns:  # databases created before hook tracking
-            conn.execute("ALTER TABLE outreach_events ADD COLUMN hook TEXT NOT NULL DEFAULT ''")
+        # Databases created before hook / source tracking.
+        for column in ("hook", "source_text"):
+            if column not in columns:
+                conn.execute(
+                    f"ALTER TABLE outreach_events ADD COLUMN {column} TEXT NOT NULL DEFAULT ''"
+                )
         conn.commit()
     finally:
         conn.close()
@@ -732,23 +844,39 @@ def init_db(db_path: Path) -> None:
 
 def log_state(
     db_path: Path, company: str, contact: dict, status: str, url: str = "", message: str = "",
-    hook: str = "",
+    hook: str = "", source_text: str = "",
 ) -> None:
+    """Append one status event, refusing any transition ALLOWED_TRANSITIONS doesn't permit.
+
+    The read of the current status and the insert share one write-locked
+    transaction, so two writers can't both pass the check and double-log.
+    """
     if status not in VALID_STATES:
         raise ValueError(f"Unknown outreach status: {status}")
     init_db(db_path)
-    conn = sqlite3.connect(str(db_path))
+    conn = sqlite3.connect(str(db_path), isolation_level=None)
     try:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT status FROM outreach_events WHERE company = ? AND contact_name = ? "
+            "ORDER BY id DESC LIMIT 1",
+            (company, contact.get("name", "")),
+        ).fetchone()
+        try:
+            check_transition(row[0] if row else None, status)
+        except InvalidTransitionError as error:
+            conn.execute("ROLLBACK")
+            raise InvalidTransitionError(f"{company} / {contact.get('name', '')}: {error}") from None
         conn.execute(
-            "INSERT INTO outreach_events "
-            "(timestamp, company, contact_name, contact_title, channel, url, message, status, hook) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO outreach_events (timestamp, company, contact_name, contact_title, "
+            "channel, url, message, status, hook, source_text) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 utc_now(), company, contact.get("name", ""), contact.get("title", ""),
-                contact.get("channel", ""), url, message, status, hook,
+                contact.get("channel", ""), url, message, status, hook, source_text,
             ),
         )
-        conn.commit()
+        conn.execute("COMMIT")
     finally:
         conn.close()
 
@@ -762,9 +890,11 @@ class OutreachRecord:
     message: str
     status: str
     hook: str
+    url: str = ""
+    source_text: str = ""
 
 
-_RECORD_COLUMNS = "company, contact_name, contact_title, channel, message, status, hook"
+_RECORD_COLUMNS = "company, contact_name, contact_title, channel, message, status, hook, url, source_text"
 
 
 def latest_outreach_record(db_path: Path, company: str, contact_name: str) -> OutreachRecord | None:
@@ -806,29 +936,29 @@ def mark_sent(db_path: Path, company: str, contact_name: str = "") -> bool:
     This is the ONLY function that writes STATE_SENT, and it is only ever
     invoked from the `mark-sent` CLI command - never from the automated
     runner - keeping the "no automatic send" guarantee true for the whole log.
+
+    Raises InvalidTransitionError if that contact's draft was never approved
+    or is already sent/skipped.
     """
     init_db(db_path)
     conn = sqlite3.connect(str(db_path))
     try:
         row = conn.execute(
-            "SELECT contact_title, channel, url, message FROM outreach_events "
+            "SELECT contact_name, contact_title, channel, url, message, hook FROM outreach_events "
             "WHERE company = ? AND (? = '' OR contact_name = ?) "
             "ORDER BY id DESC LIMIT 1",
             (company, contact_name, contact_name),
         ).fetchone()
-        if row is None:
-            return False
-        contact_title, channel, url, message = row
-        conn.execute(
-            "INSERT INTO outreach_events "
-            "(timestamp, company, contact_name, contact_title, channel, url, message, status) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (utc_now(), company, contact_name, contact_title, channel, url, message, STATE_SENT),
-        )
-        conn.commit()
-        return True
     finally:
         conn.close()
+    if row is None:
+        return False
+    name, title, channel, url, message, hook = (value or "" for value in row)
+    log_state(
+        db_path, company, {"name": name, "title": title, "channel": channel}, STATE_SENT,
+        url=url, message=message, hook=hook,
+    )
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -1024,30 +1154,49 @@ class TerminalReviewGate:
     async def review(
         self, label: str, hook: str, message: str,
         redraft: Callable[[str], str | None] | None = None,
+        blocked_reason: str = "",
+        check_message: Callable[[str], list[str]] | None = None,
     ) -> ReviewResult:
         if self._lock is None:
             self._lock = asyncio.Lock()
         async with self._lock:
             if self.quit_requested:
                 return ReviewResult(approved=False, message=message, hook=hook, quit=True)
-            result = await asyncio.to_thread(self.review_sync, label, hook, message, redraft)
+            result = await asyncio.to_thread(
+                self.review_sync, label, hook, message, redraft, blocked_reason, check_message
+            )
             self.quit_requested = result.quit
             return result
 
     def review_sync(
         self, label: str, hook: str, message: str,
         redraft: Callable[[str], str | None] | None = None,
+        blocked_reason: str = "",
+        check_message: Callable[[str], list[str]] | None = None,
     ) -> ReviewResult:
-        options = "[a]pprove  [e]dit  " + ("[r]edraft  [h] next hook  " if redraft else "")
-        options += "[s]kip  [q]uit"
+        """Show the draft until the human decides.
+
+        blocked_reason disables approval (edit/skip still work). check_message
+        returns warnings about the current text; they are shown on every pass,
+        so an edit or redraft that fixes them makes them go away.
+        """
+        options = ("" if blocked_reason else "[a]pprove  ") + "[e]dit  "
+        options += ("[r]edraft  [h] next hook  " if redraft else "") + "[s]kip  [q]uit"
         while True:
             self.output(format_draft_for_review(label, hook, message))
+            if blocked_reason:
+                self.output(f"  ! Approval disabled: {blocked_reason}.")
+            for warning in (check_message(message) if check_message else []):
+                self.output(f"  ! Check before approving: {warning}.")
             self.output(options)
             try:
                 choice = self.input_fn("> ").strip().lower()
             except EOFError:
                 choice = "q"
             if choice in ("a", "approve"):
+                if blocked_reason:
+                    self.output(f"  Can't approve: {blocked_reason}. Edit or skip instead.")
+                    continue
                 return ReviewResult(approved=True, message=message, hook=hook)
             if choice in ("s", "skip"):
                 return ReviewResult(approved=False, message=message, hook=hook)
@@ -1106,8 +1255,8 @@ async def prepare_outreach_target(
                 latest_outreach_record, db_path, company, contact.get("name", "")
             )
             status = record.status if record else None
-            if status in (STATE_SENT, STATE_SKIPPED) or (
-                draft_only and status in (STATE_DRAFTED, STATE_APPROVED)
+            if status in FINAL_STATES or (
+                draft_only and status in (STATE_DRAFTED, STATE_APPROVED, *TAB_OPENED_STATES)
             ):
                 print(f"\n=== Skipping {label}: already {status} ===")
                 continue
@@ -1115,8 +1264,9 @@ async def prepare_outreach_target(
             hook = select_hook_archetype(company, contact, contact.get("hook") or target.get("hook"))
             tech_signals = list(target.get("known_tech_stack") or [])
             site_excerpt = ""
-            approved = status == STATE_APPROVED
-            if record and status in (STATE_APPROVED, STATE_DRAFTED) and record.message:
+            source_text = record.source_text if record else ""
+            approved = status in (STATE_APPROVED, *TAB_OPENED_STATES)
+            if record and (approved or status == STATE_DRAFTED) and record.message:
                 message, hook = record.message, record.hook or hook
                 print(f"\n=== Using saved {status} draft: {label} ===")
             else:
@@ -1139,8 +1289,10 @@ async def prepare_outreach_target(
                     )
                 if not message:
                     raise RuntimeError("No draft available; left for manual drafting")
+                source_text = "\n".join(part for part in (site_excerpt, target.get("context", "")) if part)
                 await asyncio.to_thread(
-                    log_state, db_path, company, contact, STATE_DRAFTED, message=message, hook=hook
+                    log_state, db_path, company, contact, STATE_DRAFTED, message=message, hook=hook,
+                    url=contact.get("profile_url", ""), source_text=source_text,
                 )
 
             if draft_only:
@@ -1156,7 +1308,13 @@ async def prepare_outreach_target(
                         target.get("context", ""), new_hook, site_excerpt, target_type,
                     )
 
-                decision = await review.review(label, hook, message, redraft)
+                decision = await review.review(
+                    label, hook, message, redraft,
+                    blocked_reason=contact_handle_problem(contact),
+                    check_message=lambda text: draft_problems(
+                        text, source_text, candidate_context_text
+                    ),
+                )
                 if not decision.approved:
                     if page is not None:
                         await page.close()
@@ -1173,6 +1331,12 @@ async def prepare_outreach_target(
                 await asyncio.to_thread(
                     log_state, db_path, company, contact, STATE_APPROVED, message=message, hook=hook
                 )
+
+            # Also covers drafts approved before the handle check existed, or
+            # whose profile URL was changed in the targets file afterwards.
+            handle_problem = contact_handle_problem(contact)
+            if handle_problem:
+                raise RuntimeError(f"Not opening a tab: {handle_problem}")
 
             async with semaphore:
                 await rate_limiter.wait()
@@ -1351,18 +1515,45 @@ def cmd_run(args: argparse.Namespace) -> int:
     return 0
 
 
-def review_pending_drafts(db_path: Path, gate: TerminalReviewGate | None = None) -> dict[str, int]:
-    """Walk every unreviewed draft in the database through the terminal gate."""
+def contacts_by_key(targets: list[dict]) -> dict[tuple[str, str], dict]:
+    """Index target contacts by (company, contact name), the key the outreach log uses."""
+    return {
+        (target["company"], contact.get("name", "")): contact
+        for target in targets for contact in target["contacts"]
+    }
+
+
+def review_pending_drafts(
+    db_path: Path,
+    gate: TerminalReviewGate | None = None,
+    contacts: dict[tuple[str, str], dict] | None = None,
+    candidate_context_text: str = "",
+) -> dict[str, int]:
+    """Walk every unreviewed draft in the database through the terminal gate.
+
+    `contacts` (from the targets file) supplies each contact's current profile
+    URL, so fixing a URL there takes effect without redrafting; otherwise the
+    URL saved with the draft is used.
+    """
     gate = gate or TerminalReviewGate()
+    contacts = contacts or {}
     drafts = pending_drafts(db_path)
     counts = {"approved": 0, "skipped": 0, "remaining": len(drafts)}
     for index, record in enumerate(drafts, start=1):
         contact = {
             "name": record.contact_name, "title": record.contact_title, "channel": record.channel,
         }
+        current = contacts.get((record.company, record.contact_name), {})
+        handle_contact = {**contact, "profile_url": current.get("profile_url") or record.url}
         title = f" ({record.contact_title})" if record.contact_title else ""
         label = f"[{index}/{len(drafts)}] {record.company} - {record.contact_name}{title} via {record.channel or '?'}"
-        result = gate.review_sync(label, record.hook, record.message)
+        result = gate.review_sync(
+            label, record.hook, record.message,
+            blocked_reason=contact_handle_problem(handle_contact),
+            check_message=lambda text, sources=record.source_text: draft_problems(
+                text, sources, candidate_context_text
+            ),
+        )
         if result.quit:
             break
         status = STATE_APPROVED if result.approved else STATE_SKIPPED
@@ -1373,7 +1564,14 @@ def review_pending_drafts(db_path: Path, gate: TerminalReviewGate | None = None)
 
 
 def cmd_review(args: argparse.Namespace) -> int:
-    counts = review_pending_drafts(args.output)
+    targets_path = getattr(args, "targets", DEFAULT_TARGETS_PATH)
+    contacts = contacts_by_key(load_targets(targets_path)) if targets_path.exists() else {}
+    try:
+        candidate_context_text = load_candidate_context()
+    except FileNotFoundError:
+        candidate_context_text = ""
+    counts = review_pending_drafts(args.output, contacts=contacts,
+                                   candidate_context_text=candidate_context_text)
     print(
         f"\nApproved {counts['approved']}, skipped {counts['skipped']}, "
         f"{counts['remaining']} still waiting."
@@ -1387,7 +1585,13 @@ def cmd_review(args: argparse.Namespace) -> int:
 
 
 def cmd_mark_sent(args: argparse.Namespace) -> int:
-    if mark_sent(args.output, args.company, args.contact):
+    try:
+        marked = mark_sent(args.output, args.company, args.contact)
+    except InvalidTransitionError as error:
+        print(f"[error] Not marked as sent: {error}. Only approved drafts can be sent.",
+              file=sys.stderr)
+        return 1
+    if marked:
         print(f"[ok] Marked '{args.company}' ({args.contact or 'any contact'}) as sent.")
         return 0
     print(
@@ -1445,6 +1649,10 @@ def build_parser() -> argparse.ArgumentParser:
         "review", help="Approve, edit, or skip saved drafts at the terminal"
     )
     review_parser.add_argument("--output", type=Path, default=DEFAULT_DB_PATH)
+    review_parser.add_argument(
+        "--targets", type=Path, default=DEFAULT_TARGETS_PATH,
+        help="Targets file to read each contact's current profile URL from",
+    )
     review_parser.set_defaults(func=cmd_review)
 
     mark_parser = subparsers.add_parser(

@@ -28,6 +28,189 @@ def _scripted_gate(*answers: str, output=None) -> "outreach_agent.TerminalReview
     )
 
 
+_PATH_TO = {
+    outreach_agent.STATE_DRAFTED: ["discovered", "drafted"],
+    outreach_agent.STATE_APPROVED: ["discovered", "drafted", "approved"],
+    outreach_agent.STATE_SKIPPED: ["discovered", "drafted", "skipped"],
+    outreach_agent.STATE_REVIEWED: ["discovered", "drafted", "approved", "reviewed"],
+    outreach_agent.STATE_SENT: ["discovered", "drafted", "approved", "reviewed", "sent"],
+}
+
+
+def _log_path(db_path, company, contact, status, message="hello"):
+    """Log the legal sequence of states that ends in `status`."""
+    for step in _PATH_TO[status]:
+        outreach_agent.log_state(db_path, company, contact, step, message=message)
+
+
+class StateTransitionTests(unittest.TestCase):
+    CONTACT = {"name": "Jane", "channel": "email"}
+
+    def _db(self):
+        tmpdir = tempfile.TemporaryDirectory()
+        self.addCleanup(tmpdir.cleanup)
+        return Path(tmpdir.name) / "outreach.db"
+
+    def test_happy_path_is_allowed(self):
+        db_path = self._db()
+        _log_path(db_path, "Acme", self.CONTACT, outreach_agent.STATE_SENT)
+        self.assertEqual(outreach_agent.latest_outreach_record(db_path, "Acme", "Jane").status, "sent")
+
+    def test_first_event_must_be_discovered(self):
+        db_path = self._db()
+        for status in ("drafted", "approved", "sent"):
+            with self.assertRaises(outreach_agent.InvalidTransitionError):
+                outreach_agent.log_state(db_path, "Acme", self.CONTACT, status)
+
+    def test_draft_cannot_skip_approval(self):
+        db_path = self._db()
+        _log_path(db_path, "Acme", self.CONTACT, outreach_agent.STATE_DRAFTED)
+        for status in ("reviewed", "sent", "auth_required"):
+            with self.assertRaises(outreach_agent.InvalidTransitionError):
+                outreach_agent.log_state(db_path, "Acme", self.CONTACT, status)
+
+    def test_final_states_accept_nothing_not_even_error(self):
+        for final in (outreach_agent.STATE_SENT, outreach_agent.STATE_SKIPPED):
+            db_path = self._db()
+            _log_path(db_path, "Acme", self.CONTACT, final)
+            for status in outreach_agent.VALID_STATES:
+                with self.assertRaises(outreach_agent.InvalidTransitionError, msg=f"{final}->{status}"):
+                    outreach_agent.log_state(db_path, "Acme", self.CONTACT, status)
+
+    def test_approval_cannot_be_replayed(self):
+        db_path = self._db()
+        _log_path(db_path, "Acme", self.CONTACT, outreach_agent.STATE_APPROVED)
+        with self.assertRaises(outreach_agent.InvalidTransitionError):
+            outreach_agent.log_state(db_path, "Acme", self.CONTACT, outreach_agent.STATE_APPROVED)
+
+    def test_rejected_write_leaves_the_log_unchanged(self):
+        db_path = self._db()
+        _log_path(db_path, "Acme", self.CONTACT, outreach_agent.STATE_DRAFTED)
+        with self.assertRaises(outreach_agent.InvalidTransitionError):
+            outreach_agent.log_state(db_path, "Acme", self.CONTACT, outreach_agent.STATE_SENT)
+        with sqlite3.connect(str(db_path)) as conn:
+            count = conn.execute("SELECT COUNT(*) FROM outreach_events").fetchone()[0]
+        self.assertEqual(count, 2)
+
+    def test_error_is_retried_by_rediscovering(self):
+        db_path = self._db()
+        _log_path(db_path, "Acme", self.CONTACT, outreach_agent.STATE_APPROVED)
+        outreach_agent.log_state(db_path, "Acme", self.CONTACT, outreach_agent.STATE_ERROR)
+        with self.assertRaises(outreach_agent.InvalidTransitionError):
+            outreach_agent.log_state(db_path, "Acme", self.CONTACT, outreach_agent.STATE_APPROVED)
+        outreach_agent.log_state(db_path, "Acme", self.CONTACT, outreach_agent.STATE_DISCOVERED)
+
+    def test_contacts_are_tracked_independently(self):
+        db_path = self._db()
+        _log_path(db_path, "Acme", self.CONTACT, outreach_agent.STATE_SENT)
+        outreach_agent.log_state(db_path, "Acme", {"name": "Bob"}, outreach_agent.STATE_DISCOVERED)
+
+    def test_mark_sent_refuses_unapproved_draft(self):
+        db_path = self._db()
+        _log_path(db_path, "Acme", self.CONTACT, outreach_agent.STATE_DRAFTED)
+        with self.assertRaises(outreach_agent.InvalidTransitionError):
+            outreach_agent.mark_sent(db_path, "Acme", "Jane")
+
+    def test_mark_sent_twice_is_refused(self):
+        db_path = self._db()
+        _log_path(db_path, "Acme", self.CONTACT, outreach_agent.STATE_REVIEWED)
+        self.assertTrue(outreach_agent.mark_sent(db_path, "Acme", "Jane"))
+        with self.assertRaises(outreach_agent.InvalidTransitionError):
+            outreach_agent.mark_sent(db_path, "Acme", "Jane")
+
+    def test_mark_sent_without_contact_name_uses_the_matched_contact(self):
+        db_path = self._db()
+        _log_path(db_path, "Acme", self.CONTACT, outreach_agent.STATE_REVIEWED)
+        self.assertTrue(outreach_agent.mark_sent(db_path, "Acme"))
+        self.assertEqual(outreach_agent.latest_outreach_record(db_path, "Acme", "Jane").status, "sent")
+
+
+class HandleCheckTests(unittest.TestCase):
+    def test_personal_profiles_pass(self):
+        for contact in (
+            {"channel": "linkedin", "profile_url": "https://www.linkedin.com/in/billskenney/"},
+            {"channel": "x", "profile_url": "https://x.com/jane_founder"},
+            {"channel": "email", "email": "jane@acme.com"},
+            {"channel": "contact_form", "profile_url": "https://acme.com/contact"},
+        ):
+            self.assertEqual(outreach_agent.contact_handle_problem(contact), "", contact)
+
+    def test_company_pages_and_missing_urls_are_flagged(self):
+        for contact in (
+            {"channel": "linkedin", "profile_url": "https://www.linkedin.com/company/koto-studio"},
+            {"channel": "linkedin", "profile_url": "https://www.linkedin.com/school/mit"},
+            {"channel": "linkedin", "profile_url": "https://koto.studio/team"},
+            {"channel": "linkedin", "profile_url": ""},
+            {"channel": "linkedin"},
+            {"channel": "x", "profile_url": "https://x.com/home"},
+            {"channel": "x", "profile_url": "https://x.com/acme/status/123"},
+        ):
+            self.assertNotEqual(outreach_agent.contact_handle_problem(contact), "", contact)
+
+    def test_gate_refuses_approval_when_blocked(self):
+        shown = []
+        gate = _scripted_gate("a", "s", output=shown.append)
+        result = gate.review_sync("Koto", "trojan_horse", "draft", blocked_reason="company page")
+        self.assertFalse(result.approved)
+        self.assertFalse(result.quit)
+        self.assertTrue(any("Can't approve: company page" in line for line in shown))
+        self.assertFalse(any("[a]pprove" in line for line in shown))
+
+
+class NumberGroundingTests(unittest.TestCase):
+    CANDIDATE = "Scraper 5000: ~14k-line platform. CoKeeper routes GREEN/YELLOW/RED."
+
+    def test_numbers_from_site_and_candidate_context_are_grounded(self):
+        message = "You've built over 600 brands. Scraper 5000 is ~14k lines. A 15-minute call?"
+        self.assertEqual(
+            outreach_agent.ungrounded_numbers(message, "Over 600 brands built", self.CANDIDATE), []
+        )
+
+    def test_invented_numbers_are_flagged_once_in_order(self):
+        message = "You ship 40 sites a year across 12 markets; 40 is a lot."
+        self.assertEqual(outreach_agent.ungrounded_numbers(message, "We build websites."), ["40", "12"])
+
+    def test_numbers_match_whole_not_as_substrings(self):
+        self.assertEqual(outreach_agent.ungrounded_numbers("Only 60 brands.", "600 brands"), ["60"])
+        self.assertEqual(outreach_agent.ungrounded_numbers("Over 600 brands.", "6000 brands"), ["600"])
+
+    def test_thousands_separators_are_normalized(self):
+        self.assertEqual(outreach_agent.ungrounded_numbers("1,200 clients", "1200 clients"), [])
+
+    def test_small_counts_never_need_a_source(self):
+        self.assertEqual(outreach_agent.ungrounded_numbers("Two teams, 3 steps, 10 days.", ""), [])
+
+    def test_draft_with_invented_number_is_regenerated_once(self):
+        client = MagicMock()
+        client.models.generate_content.side_effect = [
+            MagicMock(text="Jane, your 40 designers hand-route approvals."),
+            MagicMock(text="Jane, your designers hand-route approvals."),
+        ]
+        fake_genai = MagicMock(Client=MagicMock(return_value=client))
+        with patch.dict("os.environ", {"GEMINI_API_KEY": "test"}), \
+                patch.dict("sys.modules", {"google": MagicMock(genai=fake_genai), "google.genai": fake_genai}):
+            result = outreach_agent.draft_outreach_message(
+                "Acme", {"name": "Jane"}, [], self.CANDIDATE, hook="reverse_audit",
+                site_excerpt="Acme is a design studio.",
+            )
+        self.assertEqual(result, "Jane, your designers hand-route approvals.")
+        retry_prompt = client.models.generate_content.call_args.kwargs["contents"]
+        self.assertIn("numbers found in no source: 40", retry_prompt)
+
+    def test_gate_warning_tracks_the_current_text(self):
+        shown = []
+        gate = _scripted_gate("e", "Jane, your designers hand-route approvals.", ".", "a",
+                              output=shown.append)
+        check = lambda text: outreach_agent.draft_problems(text, "design studio")
+        with patch.dict("os.environ", {}, clear=True):
+            result = gate.review_sync("Acme", "reverse_audit", "Jane, your 40 designers...",
+                                      check_message=check)
+        self.assertTrue(result.approved)
+        warnings = [line for line in shown if "Check before approving" in line]
+        self.assertEqual(len(warnings), 1)  # shown for the original, gone after the edit
+        self.assertIn("40", warnings[0])
+
+
 class RateLimiterTests(unittest.IsolatedAsyncioTestCase):
     async def test_enforces_minimum_interval_between_calls(self):
         limiter = outreach_agent.RateLimiter(0.1)
@@ -563,6 +746,9 @@ class SqliteTrackingTests(unittest.TestCase):
                 db_path, "Acme", contact, outreach_agent.STATE_DRAFTED, message="hello"
             )
             outreach_agent.log_state(
+                db_path, "Acme", contact, outreach_agent.STATE_APPROVED, message="hello"
+            )
+            outreach_agent.log_state(
                 db_path, "Acme", contact, outreach_agent.STATE_REVIEWED,
                 url="https://mail.google.com/x", message="hello",
             )
@@ -577,6 +763,7 @@ class SqliteTrackingTests(unittest.TestCase):
                 [
                     outreach_agent.STATE_DISCOVERED,
                     outreach_agent.STATE_DRAFTED,
+                    outreach_agent.STATE_APPROVED,
                     outreach_agent.STATE_REVIEWED,
                 ],
             )
@@ -978,11 +1165,62 @@ class ApprovalGateRunnerTests(unittest.IsolatedAsyncioTestCase):
     async def test_sent_contacts_are_left_alone(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             db_path = Path(tmpdir) / "outreach.db"
-            outreach_agent.log_state(db_path, "Acme", self.TARGET["contacts"][0], outreach_agent.STATE_SENT)
+            _log_path(db_path, "Acme", self.TARGET["contacts"][0], outreach_agent.STATE_SENT)
             results, page, draft_mock = await self._run(db_path, _scripted_gate())
             self.assertEqual(results, [])
             draft_mock.assert_not_called()
             page.goto.assert_not_awaited()
+
+    async def test_rerun_after_tab_opened_reuses_approved_message(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "outreach.db"
+            _log_path(db_path, "Acme", self.TARGET["contacts"][0], outreach_agent.STATE_REVIEWED,
+                      message="Jane, the approved text.")
+            gate = outreach_agent.TerminalReviewGate(
+                input_fn=MagicMock(side_effect=AssertionError("prompted")), output=lambda _t: None
+            )
+            with patch.object(outreach_agent, "detect_auth_wall", new=AsyncMock(return_value=False)), \
+                    patch.object(outreach_agent, "report_send_controls", new=AsyncMock()):
+                _, page, draft_mock = await self._run(db_path, gate)
+            draft_mock.assert_not_called()
+            self.assertIn("approved%20text", page.goto.await_args.args[0].replace("+", "%20"))
+            self.assertEqual(self._statuses(db_path)[-2:], ["reviewed", "reviewed"])
+
+    def test_review_command_blocks_company_pages_using_targets_file_url(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "outreach.db"
+            koto = {"name": "Leadership Contact", "channel": "linkedin",
+                    "profile_url": "https://www.linkedin.com/company/koto-studio"}
+            bill = {"name": "Bill Kenney", "channel": "linkedin", "profile_url": ""}
+            _log_path(db_path, "Koto", koto, outreach_agent.STATE_DRAFTED)
+            _log_path(db_path, "Focus Lab", bill, outreach_agent.STATE_DRAFTED)
+            # The targets file now has Bill's real profile; the draft row predates it.
+            contacts = {
+                ("Koto", "Leadership Contact"): koto,
+                ("Focus Lab", "Bill Kenney"): {**bill, "profile_url": "https://www.linkedin.com/in/billskenney/"},
+            }
+            shown = []
+            counts = outreach_agent.review_pending_drafts(
+                db_path, _scripted_gate("a", "s", "a", output=shown.append), contacts=contacts
+            )
+            self.assertEqual(counts, {"approved": 1, "skipped": 1, "remaining": 0})
+            self.assertEqual(outreach_agent.latest_outreach_record(db_path, "Koto", "Leadership Contact").status, "skipped")
+            self.assertEqual(outreach_agent.latest_outreach_record(db_path, "Focus Lab", "Bill Kenney").status, "approved")
+
+    async def test_approved_contact_with_company_page_never_opens_a_tab(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "outreach.db"
+            contact = {"name": "Jane", "channel": "linkedin",
+                       "profile_url": "https://www.linkedin.com/company/acme"}
+            _log_path(db_path, "Acme", contact, outreach_agent.STATE_APPROVED)
+            context, page = self._context()
+            results = await outreach_agent.prepare_outreach_target(
+                context, {"company": "Acme", "contacts": [contact]}, asyncio.Semaphore(1), db_path,
+                "ctx", outreach_agent.RateLimiter(0.0), review=_scripted_gate(),
+            )
+            page.goto.assert_not_awaited()
+            self.assertEqual(results, [(None, "Acme - Jane")])
+            self.assertEqual(self._statuses(db_path)[-1], outreach_agent.STATE_ERROR)
 
     def test_init_db_adds_hook_column_to_old_databases(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -995,10 +1233,13 @@ class ApprovalGateRunnerTests(unittest.IsolatedAsyncioTestCase):
             )
             conn.commit()
             conn.close()
+            outreach_agent.log_state(db_path, "Acme", {"name": "Jane"}, outreach_agent.STATE_DISCOVERED)
             outreach_agent.log_state(
-                db_path, "Acme", {"name": "Jane"}, outreach_agent.STATE_DRAFTED, message="m", hook="trojan_horse"
+                db_path, "Acme", {"name": "Jane"}, outreach_agent.STATE_DRAFTED, message="m",
+                hook="trojan_horse", source_text="600 brands",
             )
-            self.assertEqual(outreach_agent.pending_drafts(db_path)[0].hook, "trojan_horse")
+            draft = outreach_agent.pending_drafts(db_path)[0]
+            self.assertEqual((draft.hook, draft.source_text), ("trojan_horse", "600 brands"))
 
 
 if __name__ == "__main__":
