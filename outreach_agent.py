@@ -153,12 +153,17 @@ DEFAULT_MIN_INTERVAL_SECONDS = 4.0
 
 TECH_SIGNAL_KEYWORDS = [
     "Python", "FastAPI", "Django", "Flask", "Docker", "Kubernetes", "Postgres",
-    "PostgreSQL", "MySQL", "Redis", "Kafka", "gRPC", "GraphQL", "React", "TypeScript",
-    "Node.js", "Go", "Rust", "AWS", "GCP", "Azure", "Terraform", "Airflow",
+    "PostgreSQL", "MySQL", "Redis", "Kafka", "gRPC", "GraphQL", "TypeScript",
+    "Node.js", "Golang", "AWS", "GCP", "Terraform", "Airflow",
     "data pipeline", "microservices", "event-driven", "CI/CD", "Playwright",
 ]
+# Tech names that are also everyday English words ("react quickly", "azure
+# sky") only count in their capitalized form. Bare "Go" is left out entirely:
+# "Go further" is far more common on a homepage than the language.
+CASE_SENSITIVE_TECH_KEYWORDS = ["React", "Rust", "Azure"]
 TECH_SIGNAL_RE = re.compile(
-    r"\b(" + "|".join(re.escape(keyword) for keyword in TECH_SIGNAL_KEYWORDS) + r")\b",
+    r"\b(" + "|".join(re.escape(keyword) for keyword in TECH_SIGNAL_KEYWORDS) + r")\b"
+    r"|\b(?-i:" + "|".join(CASE_SENSITIVE_TECH_KEYWORDS) + r")\b",
     re.IGNORECASE,
 )
 
@@ -375,7 +380,7 @@ def extract_tech_signals(text: str) -> list[str]:
     """Return the unique tech-stack keywords found in text, in first-seen order."""
     seen: list[str] = []
     for match in TECH_SIGNAL_RE.finditer(text or ""):
-        token = match.group(1)
+        token = match.group(0)
         if token not in seen:
             seen.append(token)
     return seen

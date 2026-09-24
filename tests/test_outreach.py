@@ -196,6 +196,16 @@ class TechSignalTests(unittest.TestCase):
         self.assertTrue(any(s.lower() == "python" for s in signals))
         self.assertTrue(any(s.lower() == "postgres" for s in signals))
 
+    def test_everyday_words_are_not_tech_signals(self):
+        text = "Go further. We react fast, rust never sleeps, and the azure sky is clear."
+        self.assertEqual(outreach_agent.extract_tech_signals(text), [])
+
+    def test_capitalized_tech_names_still_match(self):
+        text = "Our front end is React on Azure, services in Golang and Rust."
+        self.assertEqual(
+            outreach_agent.extract_tech_signals(text), ["React", "Azure", "Golang", "Rust"]
+        )
+
     def test_extract_tech_signals_empty_text(self):
         self.assertEqual(outreach_agent.extract_tech_signals(""), [])
         self.assertEqual(outreach_agent.extract_tech_signals(None), [])
