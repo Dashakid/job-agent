@@ -19,6 +19,15 @@ def _mock_locator(*, count: int = 1, visible: bool = True, tag: str = "textarea"
     return locator
 
 
+def _scripted_gate(*answers: str, output=None) -> "outreach_agent.TerminalReviewGate":
+    """A real TerminalReviewGate that reads its keyboard input from `answers`."""
+    replies = iter(answers)
+    return outreach_agent.TerminalReviewGate(
+        input_fn=lambda _prompt: next(replies),
+        output=output if output is not None else (lambda _text: None),
+    )
+
+
 class RateLimiterTests(unittest.IsolatedAsyncioTestCase):
     async def test_enforces_minimum_interval_between_calls(self):
         limiter = outreach_agent.RateLimiter(0.1)
@@ -343,6 +352,72 @@ class DraftOutreachMessageTests(unittest.TestCase):
             )
         self.assertIsNone(result)
 
+    def test_regenerates_once_when_draft_uses_cover_letter_language(self):
+        client = MagicMock()
+        client.models.generate_content.side_effect = [
+            MagicMock(text="I am writing to express my interest in Acme."),
+            MagicMock(text="Jane, most fintech teams hand-fix ledger CSVs every month."),
+        ]
+        fake_genai = MagicMock(Client=MagicMock(return_value=client))
+        with patch.dict("os.environ", {"GEMINI_API_KEY": "test"}), \
+                patch.dict("sys.modules", {"google": MagicMock(genai=fake_genai), "google.genai": fake_genai}):
+            result = outreach_agent.draft_outreach_message(
+                "Acme", {"name": "Jane"}, [], "context", hook="reverse_audit"
+            )
+        self.assertEqual(result, "Jane, most fintech teams hand-fix ledger CSVs every month.")
+        self.assertEqual(client.models.generate_content.call_count, 2)
+        retry_prompt = client.models.generate_content.call_args.kwargs["contents"]
+        self.assertIn("express my interest", retry_prompt)
+
+
+class OutreachPromptTests(unittest.TestCase):
+    CONTEXT = (
+        "# Candidate\n\n## 4. Flagship Projects\n- Old project\n\n"
+        "## 6. Proof-of-Work Systems\n- **CoKeeper:** BIGINT minor-unit ledger math.\n"
+    )
+
+    def test_hook_override_wins(self):
+        for hook in outreach_agent.HOOK_ARCHETYPES:
+            self.assertEqual(
+                outreach_agent.select_hook_archetype("Acme", {"name": "Jane"}, hook), hook
+            )
+
+    def test_unknown_override_falls_back_to_stable_rotation(self):
+        first = outreach_agent.select_hook_archetype("Acme", {"name": "Jane"}, "bogus")
+        second = outreach_agent.select_hook_archetype("Acme", {"name": "Jane"})
+        self.assertEqual(first, second)
+        self.assertIn(first, outreach_agent.HOOK_ARCHETYPES)
+
+    def test_rotation_uses_every_hook(self):
+        hooks = {
+            outreach_agent.select_hook_archetype(f"Company {i}", {"name": "CTO"})
+            for i in range(30)
+        }
+        self.assertEqual(hooks, set(outreach_agent.HOOK_ARCHETYPES))
+
+    def test_extracts_proof_of_work_section_only(self):
+        section = outreach_agent.extract_proof_of_work(self.CONTEXT)
+        self.assertIn("CoKeeper", section)
+        self.assertNotIn("Old project", section)
+        self.assertEqual(outreach_agent.extract_proof_of_work("# No section here"), "")
+
+    def test_prompt_contains_persona_hook_and_proof_of_work(self):
+        prompt = outreach_agent.build_outreach_prompt(
+            "Acme", {"name": "Jane", "title": "CTO"}, ["Python"], self.CONTEXT, "", "trojan_horse"
+        )
+        self.assertIn("outside automation and systems engineer", prompt)
+        self.assertIn("THE TROJAN HORSE COMPONENT", prompt)
+        self.assertNotIn("THE GHOST COMPETITOR", prompt)
+        self.assertIn("BIGINT minor-unit ledger math", prompt)
+        self.assertIn("human reads and edits this draft", prompt)
+
+    def test_detects_cover_letter_language(self):
+        self.assertEqual(
+            outreach_agent.find_cover_letter_language("I'm a dedicated team player!"),
+            ["team player"],
+        )
+        self.assertEqual(outreach_agent.find_cover_letter_language("Your CSV import breaks."), [])
+
 
 class SqliteTrackingTests(unittest.TestCase):
     def test_log_state_rejects_unknown_status(self):
@@ -448,7 +523,8 @@ class PrepareOutreachTargetTests(unittest.IsolatedAsyncioTestCase):
                 outreach_agent, "draft_outreach_message", return_value="a short technical hook"
             ):
                 results = await outreach_agent.prepare_outreach_target(
-                    context, target, semaphore, db_path, "candidate context", rate_limiter
+                    context, target, semaphore, db_path, "candidate context", rate_limiter,
+                    review=_scripted_gate("a"),
                 )
 
             self.assertEqual(len(results), 1)
@@ -469,6 +545,7 @@ class PrepareOutreachTargetTests(unittest.IsolatedAsyncioTestCase):
                 [
                     outreach_agent.STATE_DISCOVERED,
                     outreach_agent.STATE_DRAFTED,
+                    outreach_agent.STATE_APPROVED,
                     outreach_agent.STATE_REVIEWED,
                 ],
             )
@@ -491,7 +568,8 @@ class PrepareOutreachTargetTests(unittest.IsolatedAsyncioTestCase):
                 outreach_agent, "gather_tech_signals", new=AsyncMock(return_value=[])
             ), patch.object(outreach_agent, "draft_outreach_message", return_value=None):
                 results = await outreach_agent.prepare_outreach_target(
-                    context, target, semaphore, db_path, "candidate context", rate_limiter
+                    context, target, semaphore, db_path, "candidate context", rate_limiter,
+                    review=_scripted_gate("a"),
                 )
 
             _, failure_label = results[0]
@@ -539,7 +617,8 @@ class PrepareOutreachTargetTests(unittest.IsolatedAsyncioTestCase):
                 outreach_agent, "fill_message_box", new=AsyncMock()
             ) as fill_mock:
                 results = await outreach_agent.prepare_outreach_target(
-                    context, target, semaphore, db_path, "candidate context", rate_limiter
+                    context, target, semaphore, db_path, "candidate context", rate_limiter,
+                    review=_scripted_gate("a"),
                 )
 
             _, failure_label = results[0]
@@ -556,7 +635,10 @@ class PrepareOutreachTargetTests(unittest.IsolatedAsyncioTestCase):
             conn.close()
             self.assertEqual(
                 statuses,
-                [outreach_agent.STATE_DISCOVERED, outreach_agent.STATE_DRAFTED, outreach_agent.STATE_AUTH_REQUIRED],
+                [
+                    outreach_agent.STATE_DISCOVERED, outreach_agent.STATE_DRAFTED,
+                    outreach_agent.STATE_APPROVED, outreach_agent.STATE_AUTH_REQUIRED,
+                ],
             )
 
     async def test_records_no_composer_found_when_field_missing(self):
@@ -585,7 +667,8 @@ class PrepareOutreachTargetTests(unittest.IsolatedAsyncioTestCase):
                 outreach_agent, "gather_tech_signals", new=AsyncMock(return_value=[])
             ), patch.object(outreach_agent, "draft_outreach_message", return_value="hi"):
                 results = await outreach_agent.prepare_outreach_target(
-                    context, target, semaphore, db_path, "candidate context", rate_limiter
+                    context, target, semaphore, db_path, "candidate context", rate_limiter,
+                    review=_scripted_gate("a"),
                 )
 
             _, failure_label = results[0]
@@ -602,9 +685,193 @@ class PrepareOutreachTargetTests(unittest.IsolatedAsyncioTestCase):
                 statuses,
                 [
                     outreach_agent.STATE_DISCOVERED, outreach_agent.STATE_DRAFTED,
-                    outreach_agent.STATE_NO_COMPOSER_FOUND,
+                    outreach_agent.STATE_APPROVED, outreach_agent.STATE_NO_COMPOSER_FOUND,
                 ],
             )
+
+
+class TerminalReviewGateTests(unittest.TestCase):
+    def test_approve_returns_message_unchanged(self):
+        result = _scripted_gate("a").review_sync("Acme - Jane", "reverse_audit", "draft")
+        self.assertTrue(result.approved)
+        self.assertEqual((result.message, result.hook), ("draft", "reverse_audit"))
+
+    def test_edit_then_approve_uses_edited_text(self):
+        with patch.dict("os.environ", {}, clear=True):
+            gate = _scripted_gate("e", "Jane, new line one", "line two", ".", "a")
+            result = gate.review_sync("Acme - Jane", "trojan_horse", "old draft")
+        self.assertTrue(result.approved)
+        self.assertEqual(result.message, "Jane, new line one\nline two")
+
+    def test_redraft_and_next_hook(self):
+        redraft = MagicMock(side_effect=["second draft", "ghost draft"])
+        gate = _scripted_gate("r", "h", "a")
+        result = gate.review_sync("Acme - Jane", "trojan_horse", "first draft", redraft)
+        self.assertEqual(redraft.call_args_list[0].args, ("trojan_horse",))
+        self.assertEqual(redraft.call_args_list[1].args, ("ghost_competitor",))
+        self.assertEqual((result.message, result.hook), ("ghost draft", "ghost_competitor"))
+
+    def test_failed_redraft_keeps_current_draft(self):
+        result = _scripted_gate("r", "a").review_sync(
+            "Acme - Jane", "reverse_audit", "keep me", MagicMock(return_value=None)
+        )
+        self.assertEqual(result.message, "keep me")
+
+    def test_unknown_choice_reprompts_and_eof_quits(self):
+        def fake_input(_prompt, answers=iter(["x"])):
+            try:
+                return next(answers)
+            except StopIteration:
+                raise EOFError
+        gate = outreach_agent.TerminalReviewGate(input_fn=fake_input, output=lambda _t: None)
+        result = gate.review_sync("Acme - Jane", "reverse_audit", "draft")
+        self.assertFalse(result.approved)
+        self.assertTrue(result.quit)
+
+    def test_prints_label_hook_and_draft(self):
+        printed = []
+        _scripted_gate("s", output=printed.append).review_sync(
+            "Acme - Jane (CTO)", "ghost_competitor", "Jane, your leads sit unrouted."
+        )
+        screen = "\n".join(printed)
+        for expected in ("Acme - Jane (CTO)", "Hook: ghost_competitor", "your leads sit unrouted", "[s]kip"):
+            self.assertIn(expected, screen)
+
+
+class CliParserTests(unittest.TestCase):
+    def test_both_entry_points_accept_draft_only_and_review(self):
+        import cli
+
+        for parser, run_cmd, review_cmd in (
+            (outreach_agent.build_parser(), "run", "review"),
+            (cli.build_parser(), "outreach-run", "outreach-review"),
+        ):
+            self.assertTrue(parser.parse_args([run_cmd, "--draft-only"]).draft_only)
+            self.assertFalse(parser.parse_args([run_cmd]).draft_only)
+            self.assertTrue(callable(parser.parse_args([review_cmd]).func))
+
+
+class ApprovalGateRunnerTests(unittest.IsolatedAsyncioTestCase):
+    TARGET = {
+        "company": "Acme",
+        "contacts": [
+            {"name": "Jane", "title": "CTO", "channel": "email", "email": "jane@acme.example.com"}
+        ],
+    }
+
+    def _context(self):
+        page = AsyncMock()
+        page.is_closed = MagicMock(return_value=False)
+        page.url = "https://mail.google.com/mail/?view=cm"
+        page.title = AsyncMock(return_value="Compose")
+        page.locator = MagicMock(return_value=_mock_locator(count=0, visible=False))
+        context = AsyncMock()
+        context.new_page = AsyncMock(return_value=page)
+        return context, page
+
+    async def _run(self, db_path, gate, draft_only=False, draft="Jane, your CSV imports break."):
+        context, page = self._context()
+        with patch.object(outreach_agent, "draft_outreach_message", return_value=draft) as draft_mock:
+            results = await outreach_agent.prepare_outreach_target(
+                context, self.TARGET, asyncio.Semaphore(1), db_path, "ctx",
+                outreach_agent.RateLimiter(0.0), review=gate, draft_only=draft_only,
+            )
+        return results, page, draft_mock
+
+    @staticmethod
+    def _statuses(db_path):
+        conn = sqlite3.connect(str(db_path))
+        try:
+            return [r[0] for r in conn.execute("SELECT status FROM outreach_events ORDER BY id")]
+        finally:
+            conn.close()
+
+    async def test_skip_never_touches_the_browser(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "outreach.db"
+            results, page, _ = await self._run(db_path, _scripted_gate("s"))
+            self.assertEqual(results, [])
+            page.goto.assert_not_awaited()
+            self.assertEqual(
+                self._statuses(db_path),
+                [outreach_agent.STATE_DISCOVERED, outreach_agent.STATE_DRAFTED, outreach_agent.STATE_SKIPPED],
+            )
+
+    async def test_quit_leaves_draft_pending_and_stops_later_prompts(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "outreach.db"
+            gate = _scripted_gate("q")
+            _, page, _ = await self._run(db_path, gate)
+            page.goto.assert_not_awaited()
+            self.assertTrue(gate.quit_requested)
+            later = await gate.review("Other - Bob", "reverse_audit", "draft")
+            self.assertFalse(later.approved)
+            self.assertEqual(len(outreach_agent.pending_drafts(db_path)), 1)
+
+    async def test_draft_only_saves_draft_without_prompting_or_browsing(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "outreach.db"
+            gate = outreach_agent.TerminalReviewGate(
+                input_fn=MagicMock(side_effect=AssertionError("prompted")), output=lambda _t: None
+            )
+            results, page, _ = await self._run(db_path, gate, draft_only=True)
+            self.assertEqual(results, [])
+            page.goto.assert_not_awaited()
+            pending = outreach_agent.pending_drafts(db_path)
+            self.assertEqual([r.message for r in pending], ["Jane, your CSV imports break."])
+            self.assertIn(pending[0].hook, outreach_agent.HOOK_ARCHETYPES)
+
+            # A second draft-only run does not re-draft an already queued contact.
+            _, _, draft_mock = await self._run(db_path, gate, draft_only=True)
+            draft_mock.assert_not_called()
+
+    async def test_review_command_then_run_reuses_approved_draft(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "outreach.db"
+            await self._run(db_path, _scripted_gate(), draft_only=True)
+
+            with patch.dict("os.environ", {}, clear=True):
+                counts = outreach_agent.review_pending_drafts(
+                    db_path, _scripted_gate("e", "Jane, edited by a human.", ".", "a")
+                )
+            self.assertEqual(counts, {"approved": 1, "skipped": 0, "remaining": 0})
+
+            gate = outreach_agent.TerminalReviewGate(
+                input_fn=MagicMock(side_effect=AssertionError("prompted twice")), output=lambda _t: None
+            )
+            with patch.object(outreach_agent, "detect_auth_wall", new=AsyncMock(return_value=False)), \
+                    patch.object(outreach_agent, "report_send_controls", new=AsyncMock()):
+                results, page, draft_mock = await self._run(db_path, gate)
+            draft_mock.assert_not_called()
+            page.goto.assert_awaited_once()
+            self.assertIn("edited%20by%20a%20human", page.goto.await_args.args[0].replace("+", "%20"))
+            self.assertEqual(results, [(page, None)])
+            self.assertEqual(self._statuses(db_path)[-1], outreach_agent.STATE_REVIEWED)
+
+    async def test_sent_contacts_are_left_alone(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "outreach.db"
+            outreach_agent.log_state(db_path, "Acme", self.TARGET["contacts"][0], outreach_agent.STATE_SENT)
+            results, page, draft_mock = await self._run(db_path, _scripted_gate())
+            self.assertEqual(results, [])
+            draft_mock.assert_not_called()
+            page.goto.assert_not_awaited()
+
+    def test_init_db_adds_hook_column_to_old_databases(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "old.db"
+            conn = sqlite3.connect(str(db_path))
+            conn.execute(
+                "CREATE TABLE outreach_events (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT NOT NULL, "
+                "company TEXT NOT NULL, contact_name TEXT, contact_title TEXT, channel TEXT, url TEXT, "
+                "message TEXT, status TEXT NOT NULL)"
+            )
+            conn.commit()
+            conn.close()
+            outreach_agent.log_state(
+                db_path, "Acme", {"name": "Jane"}, outreach_agent.STATE_DRAFTED, message="m", hook="trojan_horse"
+            )
+            self.assertEqual(outreach_agent.pending_drafts(db_path)[0].hook, "trojan_horse")
 
 
 if __name__ == "__main__":

@@ -7,7 +7,8 @@ Subcommands:
     sync-sheets                Push local JSON logs to Google Sheets (sheets_sync.py)
     sync-all                  Run sync-email then sync-sheets
     batch-run   --file FILE   Apply to every job URL in a scraper.py queue file
-    outreach-run                 Draft and open review tabs for outreach targets (outreach_agent.py)
+    outreach-run                 Draft, approve at the terminal, then open review tabs (outreach_agent.py)
+    outreach-review              Approve, edit, or skip drafts saved by outreach-run --draft-only
     outreach-mark-sent            Record a human-confirmed outreach send
     outreach-sync-sheet            Push the outreach SQLite log to Google Sheets
 
@@ -18,6 +19,7 @@ Examples:
     python cli.py sync-all
     python cli.py batch-run --file queues/pending_jobs.json
     python cli.py outreach-run --targets queues/outreach_targets.json --output queues/outreach_log.db
+    python cli.py outreach-run --draft-only && python cli.py outreach-review
 """
 
 import argparse
@@ -138,6 +140,12 @@ def cmd_outreach_run(args: argparse.Namespace) -> int:
     return cmd_run(args)
 
 
+def cmd_outreach_review(args: argparse.Namespace) -> int:
+    from outreach_agent import cmd_review
+
+    return cmd_review(args)
+
+
 def cmd_outreach_mark_sent(args: argparse.Namespace) -> int:
     from outreach_agent import cmd_mark_sent
 
@@ -163,7 +171,7 @@ def build_parser() -> argparse.ArgumentParser:
         dest="command", required=True,
         metavar=(
             "{apply,sync-email,sync-sheets,sync-all,batch-run,review-batch,"
-            "outreach-run,outreach-mark-sent,outreach-sync-sheet}"
+            "outreach-run,outreach-review,outreach-mark-sent,outreach-sync-sheet}"
         ),
     )
 
@@ -207,7 +215,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     outreach_run_parser.add_argument("--user-data-dir", type=Path, default=DEFAULT_USER_DATA_DIR)
     outreach_run_parser.add_argument("--no-persistent-context", action="store_true")
+    outreach_run_parser.add_argument(
+        "--draft-only", action="store_true",
+        help="Save drafts for outreach-review instead of reviewing them now; opens no outreach tabs",
+    )
     outreach_run_parser.set_defaults(func=cmd_outreach_run)
+
+    outreach_review_parser = subparsers.add_parser(
+        "outreach-review", help="Approve, edit, or skip saved outreach drafts at the terminal"
+    )
+    outreach_review_parser.add_argument("--output", type=Path, default=DEFAULT_DB_PATH)
+    outreach_review_parser.set_defaults(func=cmd_outreach_review)
 
     outreach_mark_sent_parser = subparsers.add_parser(
         "outreach-mark-sent", help="Record that a human has sent a previously drafted message"
