@@ -11,6 +11,7 @@ Subcommands:
     outreach-review              Approve, edit, or skip drafts saved by outreach-run --draft-only
     outreach-mark-sent            Record a human-confirmed outreach send
     outreach-sync-sheet            Push the outreach SQLite log to Google Sheets
+    find-leads                   Find small businesses with fixable website gaps (lead_finder.py)
 
 Examples:
     python cli.py apply --url "https://jobs.ashbyhq.com/..."
@@ -20,6 +21,8 @@ Examples:
     python cli.py batch-run --file queues/pending_jobs.json
     python cli.py outreach-run --targets queues/outreach_targets.json --output queues/outreach_log.db
     python cli.py outreach-run --draft-only && python cli.py outreach-review
+    python cli.py find-leads --category accountants --area "Tampa, FL"
+    python cli.py outreach-run --targets queues/smb_targets.json --output queues/smb_outreach.db
 """
 
 import argparse
@@ -158,6 +161,12 @@ def cmd_outreach_sync_sheet(args: argparse.Namespace) -> int:
     return cmd_sync_sheet(args)
 
 
+def cmd_find_leads(args: argparse.Namespace) -> int:
+    from lead_finder import cmd_find_leads as run_find_leads
+
+    return run_find_leads(args)
+
+
 def build_parser() -> argparse.ArgumentParser:
     from outreach_agent import (
         DEFAULT_DB_PATH, DEFAULT_MIN_INTERVAL_SECONDS, DEFAULT_TARGETS_PATH, DEFAULT_USER_DATA_DIR,
@@ -171,7 +180,7 @@ def build_parser() -> argparse.ArgumentParser:
         dest="command", required=True,
         metavar=(
             "{apply,sync-email,sync-sheets,sync-all,batch-run,review-batch,"
-            "outreach-run,outreach-review,outreach-mark-sent,outreach-sync-sheet}"
+            "outreach-run,outreach-review,outreach-mark-sent,outreach-sync-sheet,find-leads}"
         ),
     )
 
@@ -241,6 +250,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     outreach_sync_sheet_parser.add_argument("--output", type=Path, default=DEFAULT_DB_PATH)
     outreach_sync_sheet_parser.set_defaults(func=cmd_outreach_sync_sheet)
+
+    from lead_finder import add_arguments as add_find_leads_arguments
+
+    find_leads_parser = subparsers.add_parser(
+        "find-leads", help="Find small businesses with fixable website gaps and queue them for outreach"
+    )
+    add_find_leads_arguments(find_leads_parser)
+    find_leads_parser.set_defaults(func=cmd_find_leads)
 
     return parser
 

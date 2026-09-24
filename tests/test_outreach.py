@@ -715,7 +715,7 @@ class OutreachPromptTests(unittest.TestCase):
         self.assertIn("Cite CoKeeper", prompt)
 
     def test_pitch_angle_dropped_when_mapped_system_is_not_in_proof_of_work(self):
-        # CONTEXT only lists CoKeeper; the design pitch maps to Staffly SMS Bot.
+        # CONTEXT only lists CoKeeper; the design pitch maps to the Staffly-based SMS automation.
         prompt = outreach_agent.build_outreach_prompt(
             "Acme", {"name": "Jane"}, [], self.CONTEXT, "", "trojan_horse", target_type="design"
         )
@@ -1244,3 +1244,33 @@ class ApprovalGateRunnerTests(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ConfidenceOrderedReviewTests(unittest.TestCase):
+    def test_review_walks_most_confident_first_and_blocks_skip(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "log.db"
+            for company in ("Low Co", "High Co", "Chain Co"):
+                contact = {"name": "Leadership Contact", "title": "", "channel": "email"}
+                outreach_agent.log_state(db, company, contact, outreach_agent.STATE_DISCOVERED)
+                outreach_agent.log_state(db, company, contact, outreach_agent.STATE_DRAFTED,
+                                         message=f"Note for {company}.", hook="reverse_audit")
+            targets = {
+                "Low Co": {"website": "https://low.com", "confidence": {"score": 20, "label": "low", "reasons": []}},
+                "High Co": {"website": "https://high.com", "confidence": {"score": 80, "label": "high", "reasons": []}},
+                "Chain Co": {"website": "https://chain.com",
+                             "confidence": {"score": 0, "label": "skip", "reasons": ["national chain"]}},
+            }
+            seen = []
+
+            class RecordingGate:
+                def review_sync(self, label, hook, message, redraft=None, blocked_reason="",
+                                check_message=None, details=""):
+                    seen.append((label.split("] ")[1].split(" - ")[0], blocked_reason, details))
+                    return outreach_agent.ReviewResult(approved=False, message=message, hook=hook)
+
+            outreach_agent.review_pending_drafts(db, gate=RecordingGate(), targets=targets)
+        self.assertEqual([company for company, _, _ in seen], ["High Co", "Low Co", "Chain Co"])
+        self.assertEqual(seen[2][1], "national chain")
+        self.assertIn("https://high.com", seen[0][2])

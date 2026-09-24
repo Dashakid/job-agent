@@ -112,6 +112,7 @@ from urllib.parse import urlencode, urlparse
 
 from playwright.async_api import Browser, BrowserContext, Page, async_playwright
 
+import llm
 from candidate_answers import load_candidate_context
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -120,7 +121,7 @@ DEFAULT_DB_PATH = BASE_DIR / "queues" / "outreach_log.db"
 # A persistent profile keeps LinkedIn/X/Gmail sessions logged in between runs,
 # so the agent hits real composers instead of a fresh, unauthenticated login wall.
 DEFAULT_USER_DATA_DIR = Path.home() / ".job-agent-browser-profile"
-GEMINI_MODEL = "gemini-2.5-flash"
+GEMINI_MODEL = llm.GEMINI_MODEL
 
 # Outreach state machine. "sent" is never written by the runner itself - only
 # a human confirming through `mark-sent` after they click send themselves.
@@ -610,13 +611,60 @@ TARGET_TYPE_PITCHES = {
     },
     "design": {
         "keywords": ("design", "brand", "branding", "studio", "creative", "webflow", "visual"),
-        "system": "Staffly SMS Bot",
+        "system": "SMS Outreach Automation",
         "angle": "the backend and operations work behind client projects (client intake, "
                  "approvals, notifications, integrations) so the studio's team stays on design",
         "avoid": "Do not pitch scraping, anti-blocking, or lead lists, and do not critique "
                  "their design work.",
     },
+    # Leads from lead_finder.py. Never keyword-matched: only an explicit
+    # target_type selects it, and SMALL_BUSINESS_RULES then override the
+    # engineer-to-engineer rules in the prompt.
+    "small_business": {
+        "keywords": (),
+        "system": "SMS Outreach Automation",
+        "angle": "a small automation that closes the gap the site check found (online booking, "
+                 "an after-hours inquiry form, text-back for missed calls, automatic follow-ups), "
+                 "set up for them so the owner never has to manage software",
+        "avoid": "Do not pitch a website redesign, SEO, ads, marketing, or a CRM.",
+    },
 }
+
+# Owners of small offices are pitched constantly and filter anything generic
+# within seconds, so the note must open with the one gap actually found on
+# their site and read like a person, not a vendor.
+SMALL_BUSINESS_RULES = """
+AUDIENCE OVERRIDE (these rules replace any conflicting rule above):
+- The reader is a busy, non-technical small-business owner who is pitched constantly.
+- Open with ONE specific gap from the "Site check" findings in the company context, stated as
+  something you noticed on their site (for example "I noticed there's no way to book online on your
+  site"). Pick the gap that most likely costs them customers. Never list several gaps.
+- Say in one plain sentence what that gap probably costs them (missed calls, after-hours visitors
+  who leave, slow replies), without inventing numbers. Tie it to one specific thing that literally
+  appears in their website text (a service they feature, a special they advertise, their
+  neighborhood) so the note could only have been written to them. Two owners on the same street
+  must never get the same sentence.
+- Offer to set up the fix for them. For past work, use this sentence word for word and say nothing
+  else about it: "I built a texting system that ran 2,000+ outreach calls and texts." Never say who
+  it was for (not "for a client", "for businesses", or "for dental offices") and never add claims
+  about what it handled.
+- No technical terms at all: no API, pipeline, EC2, FastAPI, Docker, CRM, AI, or automation jargon.
+- Never mention a script, a scan, or an automated check. Never sound like an agency.
+- Hard limit: 5 sentences and 75 words. End by offering a free 2-minute screen recording showing
+  the fix on their own site.
+- No sign-off or name: a signature is added automatically.
+"""
+
+
+def small_business_signature() -> str:
+    """Sender name, city, and an opt-out line: CAN-SPAM requires the last two on cold email."""
+    profile = load_json(BASE_DIR / "profile.json", {})
+    name = " ".join(
+        part for part in (profile.get("first_name", ""), profile.get("last_name", "")) if part
+    )
+    lines = [line for line in (name, profile.get("location_city", "")) if line]
+    lines.append('Not useful? Reply "stop" and I won\'t email again.')
+    return "\n".join(lines)
 
 
 def classify_target_type(target: dict) -> str:
@@ -696,6 +744,7 @@ def build_outreach_prompt(
         pitch_block = ""
 
     site_block = site_excerpt.strip() or "(nothing captured; do not claim to have seen their site)"
+    audience_block = SMALL_BUSINESS_RULES if target_type == "small_business" else ""
     return f"""You are an outside automation and systems engineer who has just looked over this company's
 public workflow and web presence. You are writing a short, direct note to one person there about a
 bottleneck you think they have and how you would fix it. This is not a job application.
@@ -742,13 +791,12 @@ Rules:
 - 60-90 words. Plain text only: no markdown, no subject line, no signature block.
 
 - Never repeat or paraphrase these instructions in the message.
-
+{audience_block}
 A human reads and edits this draft before anything is sent. Return only the message text."""
 
 
-def _generate_text(client, prompt: str) -> str:
-    response = client.models.generate_content(model=GEMINI_MODEL, contents=prompt)
-    message = (response.text or "").strip()
+def _generate_text(prompt: str) -> str:
+    message = llm.generate(prompt)
     return re.sub(r"^```(?:\w+)?\s*|\s*```$", "", message).strip()
 
 
@@ -767,9 +815,9 @@ def draft_outreach_message(
     Only produces text. Sending is left to the human reviewing the tab
     (see prepare_outreach_target).
     """
-    api_key = os.environ.get("GEMINI_API_KEY")
-    if not api_key:
-        print("  [draft] GEMINI_API_KEY is not set; message left blank for manual drafting.")
+    if not llm.available_providers():
+        print("  [draft] No drafting key set (GROQ_API_KEY or GEMINI_API_KEY); "
+              "message left blank for manual drafting.")
         return None
 
     hook = select_hook_archetype(company, contact, hook)
@@ -780,16 +828,12 @@ def draft_outreach_message(
     )
 
     try:
-        from google import genai
-
-        client = genai.Client(api_key=api_key)
         sources = (site_excerpt, company_context, candidate_context_text)
-        message = _generate_text(client, prompt)
+        message = _generate_text(prompt)
         problems = draft_problems(message, *sources)
         if message and problems:
             print(f"  [draft] {'; '.join(problems)}. Regenerating once.")
             message = _generate_text(
-                client,
                 prompt + "\n\nYour previous draft had these problems: " + "; ".join(problems)
                 + ". Rewrite it without them. Only use numbers that literally appear in the "
                 "website text, company context, or candidate context.",
@@ -800,9 +844,11 @@ def draft_outreach_message(
         message = strip_hook_label(message)
         if message and not contact_first_name(contact):
             message = strip_placeholder_greeting(message)
+        if message and target_type == "small_business":
+            message = message.rstrip() + "\n\n" + small_business_signature()
         return message or None
     except Exception as error:
-        print(f"  [draft] Gemini outreach drafting unavailable: {error}")
+        print(f"  [draft] Outreach drafting unavailable: {error}")
         return None
 
 
@@ -1173,6 +1219,7 @@ class TerminalReviewGate:
         redraft: Callable[[str], str | None] | None = None,
         blocked_reason: str = "",
         check_message: Callable[[str], list[str]] | None = None,
+        details: str = "",
     ) -> ReviewResult:
         """Show the draft until the human decides.
 
@@ -1184,6 +1231,8 @@ class TerminalReviewGate:
         options += ("[r]edraft  [h] next hook  " if redraft else "") + "[s]kip  [q]uit"
         while True:
             self.output(format_draft_for_review(label, hook, message))
+            if details:
+                self.output(details)
             if blocked_reason:
                 self.output(f"  ! Approval disabled: {blocked_reason}.")
             for warning in (check_message(message) if check_message else []):
@@ -1515,6 +1564,65 @@ def cmd_run(args: argparse.Namespace) -> int:
     return 0
 
 
+def format_review_details(target: dict, contact: dict) -> str:
+    """What the reviewer needs to verify a small-business draft in seconds: link, proof, route."""
+    lines = [f"  Site:  {target.get('website', '?')}"]
+    confidence = target.get("confidence")
+    if confidence:
+        lines.append(f"  Confidence: {confidence['score']} ({confidence['label']}) - "
+                     + "; ".join(confidence["reasons"]))
+    checked = target.get("browser_checked")
+    for issue in target.get("audit_findings", []):
+        lines.append(f"  {'[confirmed]' if checked else '[unchecked]'} {issue}")
+    for issue in target.get("disproven_findings", []):
+        lines.append(f"  [WRONG - their site has this] {issue}")
+    route = contact.get("email") or contact.get("contact_form_url") or contact.get("profile_url", "")
+    if route:
+        lines.append(f"  Send to: {route}")
+    return "\n".join(lines)
+
+
+# Words a draft uses when it pitches a given site-check gap (lead_finder issue text).
+GAP_CLAIM_PATTERNS = (
+    ("book or request an appointment", re.compile(r"\bbook|\bschedul|appointment", re.I)),
+    ("contact or quote form", re.compile(r"\bform\b|reach (you|out)|contact you", re.I)),
+    ("chat or text-us", re.compile(r"\bchat\b|text[- ]?us|text[- ]?back", re.I)),
+    ("not set up for phones", re.compile(r"\bphones?\b|mobile", re.I)),
+    ("secure connection", re.compile(r"\bsecure\b|https", re.I)),
+    ("footer still says", re.compile(r"\bfooter\b|unmaintained|out of date", re.I)),
+)
+
+
+def unconfirmed_claims(message: str, target: dict) -> list[str]:
+    """Warn when the draft's opening (the gap it says it noticed) isn't a confirmed finding.
+
+    Only the first sentence is checked: later sentences describe the fix, which
+    may name a different feature than the gap itself.
+    """
+    if not target.get("audit_findings") and not target.get("disproven_findings"):
+        return []
+    opening = re.split(r"(?<=[.!?])\s", message.strip(), maxsplit=1)[0]
+    confirmed = " ".join(target.get("audit_findings", []))
+    warnings = []
+    for fragment, pattern in GAP_CLAIM_PATTERNS:
+        if pattern.search(opening) and fragment not in confirmed:
+            disproven = any(fragment in issue for issue in target.get("disproven_findings", []))
+            warnings.append(
+                f"the opening claims a gap ({fragment}) that "
+                + ("their site actually has" if disproven else "the site check did not confirm")
+                + "; redraft or edit"
+            )
+    return warnings
+
+
+def review_block_reason(target: dict) -> str:
+    """Approval is disabled for leads the ranking marked skip (chains, disproven gaps)."""
+    confidence = target.get("confidence") or {}
+    if confidence.get("label") == "skip":
+        return "; ".join(confidence.get("reasons", [])) or "lead ranked skip"
+    return ""
+
+
 def contacts_by_key(targets: list[dict]) -> dict[tuple[str, str], dict]:
     """Index target contacts by (company, contact name), the key the outreach log uses."""
     return {
@@ -1528,6 +1636,7 @@ def review_pending_drafts(
     gate: TerminalReviewGate | None = None,
     contacts: dict[tuple[str, str], dict] | None = None,
     candidate_context_text: str = "",
+    targets: dict[str, dict] | None = None,
 ) -> dict[str, int]:
     """Walk every unreviewed draft in the database through the terminal gate.
 
@@ -1537,7 +1646,12 @@ def review_pending_drafts(
     """
     gate = gate or TerminalReviewGate()
     contacts = contacts or {}
-    drafts = pending_drafts(db_path)
+    targets = targets or {}
+    # Most confident leads first, so the surest sends are reviewed while fresh.
+    drafts = sorted(
+        pending_drafts(db_path),
+        key=lambda r: -((targets.get(r.company) or {}).get("confidence") or {}).get("score", 0),
+    )
     counts = {"approved": 0, "skipped": 0, "remaining": len(drafts)}
     for index, record in enumerate(drafts, start=1):
         contact = {
@@ -1547,12 +1661,32 @@ def review_pending_drafts(
         handle_contact = {**contact, "profile_url": current.get("profile_url") or record.url}
         title = f" ({record.contact_title})" if record.contact_title else ""
         label = f"[{index}/{len(drafts)}] {record.company} - {record.contact_name}{title} via {record.channel or '?'}"
+        target = targets.get(record.company)
+        redraft = None
+        if target and candidate_context_text:
+            full_contact = {**contact, **current}
+
+            def redraft(new_hook, target=target, full_contact=full_contact, record=record):
+                return draft_outreach_message(
+                    record.company, full_contact, [], candidate_context_text,
+                    target.get("context", ""), new_hook,
+                    # source_text also holds the context as drafted; drop its old site-check
+                    # line so gaps the browser check disproved can't leak back in.
+                    site_excerpt="\n".join(
+                        line for line in record.source_text.splitlines()
+                        if "Site check of their public website found" not in line
+                    ),
+                    target_type=classify_target_type(target),
+                )
         result = gate.review_sync(
             label, record.hook, record.message,
-            blocked_reason=contact_handle_problem(handle_contact),
-            check_message=lambda text, sources=record.source_text: draft_problems(
+            redraft=redraft,
+            blocked_reason=contact_handle_problem(handle_contact)
+            or (review_block_reason(target) if target else ""),
+            check_message=lambda text, sources=record.source_text, target=target: draft_problems(
                 text, sources, candidate_context_text
-            ),
+            ) + (unconfirmed_claims(text, target) if target else []),
+            details=format_review_details(target, {**contact, **current}) if target else "",
         )
         if result.quit:
             break
@@ -1565,13 +1699,16 @@ def review_pending_drafts(
 
 def cmd_review(args: argparse.Namespace) -> int:
     targets_path = getattr(args, "targets", DEFAULT_TARGETS_PATH)
-    contacts = contacts_by_key(load_targets(targets_path)) if targets_path.exists() else {}
+    targets = load_targets(targets_path) if targets_path.exists() else []
+    contacts = contacts_by_key(targets)
     try:
         candidate_context_text = load_candidate_context()
     except FileNotFoundError:
         candidate_context_text = ""
-    counts = review_pending_drafts(args.output, contacts=contacts,
-                                   candidate_context_text=candidate_context_text)
+    counts = review_pending_drafts(
+        args.output, contacts=contacts, candidate_context_text=candidate_context_text,
+        targets={target["company"]: target for target in targets},
+    )
     print(
         f"\nApproved {counts['approved']}, skipped {counts['skipped']}, "
         f"{counts['remaining']} still waiting."
