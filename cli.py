@@ -7,9 +7,13 @@ Subcommands:
     sync-sheets                Push local JSON logs to Google Sheets (sheets_sync.py)
     sync-all                  Run sync-email then sync-sheets
     batch-run   --file FILE   Apply to every job URL in a scraper.py queue file
-    outreach-run                 Draft and open review tabs for outreach targets (outreach_agent.py)
+    outreach-run                 Draft, approve at the terminal, then open review tabs (outreach_agent.py)
+    outreach-review              Approve, edit, or skip drafts saved by outreach-run --draft-only
     outreach-mark-sent            Record a human-confirmed outreach send
     outreach-sync-sheet            Push the outreach SQLite log to Google Sheets
+    find-leads                   Find small businesses with fixable website gaps (lead_finder.py)
+    review-ui                    Review outreach drafts in a local web page (review_ui.py)
+    sync-replies                 Mark contacts who replied (read-only Gmail) and draft due follow-ups
 
 Examples:
     python cli.py apply --url "https://jobs.ashbyhq.com/..."
@@ -18,6 +22,10 @@ Examples:
     python cli.py sync-all
     python cli.py batch-run --file queues/pending_jobs.json
     python cli.py outreach-run --targets queues/outreach_targets.json --output queues/outreach_log.db
+    python cli.py outreach-run --draft-only && python cli.py outreach-review
+    python cli.py find-leads --category accountants --area "Tampa, FL"
+    python cli.py outreach-run --targets queues/smb_targets.json --output queues/smb_outreach.db
+    python cli.py review-ui --targets queues/smb_targets.json --output queues/smb_outreach.db
 """
 
 import argparse
@@ -138,6 +146,12 @@ def cmd_outreach_run(args: argparse.Namespace) -> int:
     return cmd_run(args)
 
 
+def cmd_outreach_review(args: argparse.Namespace) -> int:
+    from outreach_agent import cmd_review
+
+    return cmd_review(args)
+
+
 def cmd_outreach_mark_sent(args: argparse.Namespace) -> int:
     from outreach_agent import cmd_mark_sent
 
@@ -148,6 +162,24 @@ def cmd_outreach_sync_sheet(args: argparse.Namespace) -> int:
     from outreach_agent import cmd_sync_sheet
 
     return cmd_sync_sheet(args)
+
+
+def cmd_find_leads(args: argparse.Namespace) -> int:
+    from lead_finder import cmd_find_leads as run_find_leads
+
+    return run_find_leads(args)
+
+
+def cmd_review_ui(args: argparse.Namespace) -> int:
+    from review_ui import cmd_review_ui as run_review_ui
+
+    return run_review_ui(args)
+
+
+def cmd_sync_replies(args: argparse.Namespace) -> int:
+    from followups import cmd_sync_replies as run_sync_replies
+
+    return run_sync_replies(args)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -163,7 +195,7 @@ def build_parser() -> argparse.ArgumentParser:
         dest="command", required=True,
         metavar=(
             "{apply,sync-email,sync-sheets,sync-all,batch-run,review-batch,"
-            "outreach-run,outreach-mark-sent,outreach-sync-sheet}"
+            "outreach-run,outreach-review,outreach-mark-sent,outreach-sync-sheet,find-leads,review-ui,sync-replies}"
         ),
     )
 
@@ -207,7 +239,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     outreach_run_parser.add_argument("--user-data-dir", type=Path, default=DEFAULT_USER_DATA_DIR)
     outreach_run_parser.add_argument("--no-persistent-context", action="store_true")
+    outreach_run_parser.add_argument(
+        "--draft-only", action="store_true",
+        help="Save drafts for outreach-review instead of reviewing them now; opens no outreach tabs",
+    )
     outreach_run_parser.set_defaults(func=cmd_outreach_run)
+
+    outreach_review_parser = subparsers.add_parser(
+        "outreach-review", help="Approve, edit, or skip saved outreach drafts at the terminal"
+    )
+    outreach_review_parser.add_argument("--output", type=Path, default=DEFAULT_DB_PATH)
+    outreach_review_parser.add_argument("--targets", type=Path, default=DEFAULT_TARGETS_PATH)
+    outreach_review_parser.set_defaults(func=cmd_outreach_review)
 
     outreach_mark_sent_parser = subparsers.add_parser(
         "outreach-mark-sent", help="Record that a human has sent a previously drafted message"
@@ -222,6 +265,29 @@ def build_parser() -> argparse.ArgumentParser:
     )
     outreach_sync_sheet_parser.add_argument("--output", type=Path, default=DEFAULT_DB_PATH)
     outreach_sync_sheet_parser.set_defaults(func=cmd_outreach_sync_sheet)
+
+    from lead_finder import add_arguments as add_find_leads_arguments
+
+    find_leads_parser = subparsers.add_parser(
+        "find-leads", help="Find small businesses with fixable website gaps and queue them for outreach"
+    )
+    add_find_leads_arguments(find_leads_parser)
+    find_leads_parser.set_defaults(func=cmd_find_leads)
+
+    from review_ui import add_arguments as add_review_ui_arguments
+
+    review_ui_parser = subparsers.add_parser(
+        "review-ui", help="Review outreach drafts in a local web page (never sends)"
+    )
+    add_review_ui_arguments(review_ui_parser)
+    review_ui_parser.set_defaults(func=cmd_review_ui)
+
+    sync_replies_parser = subparsers.add_parser(
+        "sync-replies", help="Mark contacts who replied (read-only Gmail) and draft due follow-ups"
+    )
+    sync_replies_parser.add_argument("--targets", type=Path, default=DEFAULT_TARGETS_PATH)
+    sync_replies_parser.add_argument("--output", type=Path, default=DEFAULT_DB_PATH)
+    sync_replies_parser.set_defaults(func=cmd_sync_replies)
 
     return parser
 

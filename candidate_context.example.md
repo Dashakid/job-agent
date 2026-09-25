@@ -23,3 +23,9 @@ here will not be claimed. Keep it accurate and specific.
 ## 5. Standard Behavioral & Situational Answers
 - **Why this kind of role:** your honest answer, in your own words.
 - **A challenge you solved:** situation, what you did, outcome.
+
+## 6. Proof-of-Work Systems
+Production systems the outreach agent can cite by name. Keep each to one line
+with a concrete technical detail.
+- **System name:** what it does, the stack, and one specific engineering detail
+  (scale, reliability trick, data-integrity guarantee).

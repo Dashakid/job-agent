@@ -59,9 +59,13 @@ fallbacks for other sites. If a step fails, it saves a screenshot to
 `failures/`, asks Gemini for a plain-language diagnosis, and retries.
 
 There is also an **outreach agent** (`outreach_agent.py`) that researches a
-company's tech stack and drafts a short cold message to a founder or
-engineering lead in a LinkedIn, X, Gmail or contact-form tab. It never sends
-anything either.
+company's tech stack and drafts a short note to a founder or engineering lead.
+Each note is written as an outside automation engineer pointing out a
+bottleneck, uses one of three rotating hooks (reverse audit, drop-in
+component, competitor pressure), and cites a system from the "Proof-of-Work"
+section of your `candidate_context.md`. You approve every draft at the
+terminal before it is typed into a LinkedIn, X, Gmail or contact-form tab.
+It never sends anything either.
 
 ### Safety defaults
 
@@ -215,13 +219,21 @@ python cli.py --help
 ```bash
 cp examples/outreach_targets.example.json queues/outreach_targets.json   # then edit
 python cli.py outreach-run --targets queues/outreach_targets.json
+# or batch it: draft everything, review in one sitting, then open the approved ones
+python cli.py outreach-run --targets queues/outreach_targets.json --draft-only
+python cli.py outreach-review
+python cli.py outreach-run --targets queues/outreach_targets.json
 python cli.py outreach-mark-sent --company "Acme Inc" --contact "Jane Doe"
 python cli.py outreach-sync-sheet
 ```
 
 The outreach runner uses a persistent browser profile
 (`~/.job-agent-browser-profile`), so you only need to log in to LinkedIn, X or
-Gmail once. It records state changes (drafted → reviewed → sent) in a local
+Gmail once. After each draft it stops and shows the draft and its hook in the
+terminal: **a**pprove, **e**dit (in `$EDITOR` if set), **r**edraft, **h** (redraft
+with the next hook), **s**kip, or **q**uit. No outreach tab is opened for a
+draft until you approve it. Skipped and sent contacts are left alone on later
+runs. It records state changes (drafted → approved → reviewed → sent) in a local
 SQLite database. A message is only marked as sent when you confirm it with
 `outreach-mark-sent`.
 
