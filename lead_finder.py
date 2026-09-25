@@ -189,13 +189,34 @@ def parse_overpass_elements(elements: list[dict]) -> list[dict]:
 def find_businesses(category: str, area: str, session: requests.Session) -> list[dict]:
     _label, tag_filters = CATEGORIES[category]
     bbox = geocode_area(area, session)
+    try:
+        elements = query_overpass(tag_filters, bbox, session)
+    except requests.RequestException:
+        # Big metros (Houston, Phoenix) time out as one query; four smaller tiles usually don't.
+        print("  [leads] Area too big for one query; splitting it into 4 tiles")
+        elements = [e for tile in split_bbox(bbox) for e in query_overpass(tag_filters, tile, session)]
+    return parse_overpass_elements(elements)
+
+
+def split_bbox(bbox: tuple[float, float, float, float]) -> list[tuple[float, float, float, float]]:
+    """Quarter a (south, west, north, east) box."""
+    south, west, north, east = bbox
+    mid_lat, mid_lon = (south + north) / 2, (west + east) / 2
+    return [(south, west, mid_lat, mid_lon), (south, mid_lon, mid_lat, east),
+            (mid_lat, west, north, mid_lon), (mid_lat, mid_lon, north, east)]
+
+
+def query_overpass(
+    tag_filters: list[str], bbox: tuple[float, float, float, float], session: requests.Session
+) -> list[dict]:
+    """Raw Overpass elements for one box, trying each public mirror in turn."""
     query = build_overpass_query(tag_filters, bbox)
     last_error: Exception | None = None
     for url in OVERPASS_URLS:
         try:
             response = session.post(url, data={"data": query}, timeout=90)
             response.raise_for_status()
-            return parse_overpass_elements(response.json().get("elements", []))
+            return response.json().get("elements", [])
         except (requests.RequestException, ValueError) as error:
             last_error = error
             print(f"  [leads] {urlparse(url).hostname} failed ({error.__class__.__name__}); trying next")

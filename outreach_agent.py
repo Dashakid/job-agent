@@ -160,10 +160,12 @@ ALLOWED_TRANSITIONS: dict[str | None, set[str]] = {
     None: {STATE_DISCOVERED},
     STATE_DISCOVERED: {STATE_DISCOVERED, STATE_DRAFTED},
     STATE_DRAFTED: {STATE_APPROVED, STATE_SKIPPED},
-    STATE_APPROVED: _AFTER_APPROVAL,
-    STATE_REVIEWED: _AFTER_APPROVAL,
-    STATE_AUTH_REQUIRED: _AFTER_APPROVAL,
-    STATE_NO_COMPOSER_FOUND: _AFTER_APPROVAL,
+    # An approved note can still be dropped before it is sent (the human
+    # changed their mind); it can never go back to drafted or be re-approved.
+    STATE_APPROVED: _AFTER_APPROVAL | {STATE_SKIPPED},
+    STATE_REVIEWED: _AFTER_APPROVAL | {STATE_SKIPPED},
+    STATE_AUTH_REQUIRED: _AFTER_APPROVAL | {STATE_SKIPPED},
+    STATE_NO_COMPOSER_FOUND: _AFTER_APPROVAL | {STATE_SKIPPED},
     STATE_ERROR: {STATE_DISCOVERED},
     STATE_SENT: set(),
     STATE_SKIPPED: set(),
@@ -1010,12 +1012,23 @@ def mark_sent(db_path: Path, company: str, contact_name: str = "") -> bool:
 # ---------------------------------------------------------------------------
 # Review-gated channel handling (never sends)
 # ---------------------------------------------------------------------------
-def build_outreach_url(contact: dict, message: str) -> tuple[str, bool]:
+def outreach_sender_email() -> str:
+    """The Gmail account outreach is composed from: profile outreach_sender_email, else email."""
+    profile = load_json(BASE_DIR / "profile.json", {})
+    return (profile.get("outreach_sender_email") or profile.get("email") or "").strip()
+
+
+def build_outreach_url(
+    contact: dict, message: str, sender_email: str | None = None
+) -> tuple[str, bool]:
     """
     Return (url, body_prefilled) for the review tab.
 
     body_prefilled is True when the draft is already embedded in the URL
     (Gmail's compose deep link), so the caller should not also fill a field.
+    The compose window opens in sender_email's Gmail account (Gmail's
+    authuser parameter), so a browser signed into several accounts still
+    sends from the outreach address rather than whichever one is default.
     """
     channel = (contact.get("channel") or "contact_form").lower()
 
@@ -1024,8 +1037,11 @@ def build_outreach_url(contact: dict, message: str) -> tuple[str, bool]:
         if not email:
             raise ValueError("email channel requires contact['email']")
         subject = contact.get("subject") or "Quick technical note"
-        params = urlencode({"view": "cm", "fs": "1", "to": email, "su": subject, "body": message})
-        return f"https://mail.google.com/mail/?{params}", True
+        sender = outreach_sender_email() if sender_email is None else sender_email
+        params = {"view": "cm", "fs": "1", "to": email, "su": subject, "body": message}
+        if sender:
+            params = {"authuser": sender, **params}
+        return f"https://mail.google.com/mail/?{urlencode(params)}", True
 
     if channel == "linkedin":
         profile_url = contact.get("profile_url", "")

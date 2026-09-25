@@ -67,6 +67,11 @@ class OverpassTests(unittest.TestCase):
         self.assertEqual(businesses[0]["website"], "https://acmetax.com")
         self.assertEqual(businesses[0]["city"], "Tampa, FL")
 
+    def test_split_bbox_quarters_the_area(self):
+        tiles = lead_finder.split_bbox((0.0, 0.0, 2.0, 4.0))
+        self.assertEqual(tiles[0], (0.0, 0.0, 1.0, 2.0))
+        self.assertEqual(tiles[3], (1.0, 2.0, 2.0, 4.0))
+
     def test_query_covers_every_tag_and_website_key(self):
         query = lead_finder.build_overpass_query(['office="accountant"'], (1.0, 2.0, 3.0, 4.0))
         self.assertIn('node[office="accountant"]["website"](1.00000,2.00000,3.00000,4.00000);', query)

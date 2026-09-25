@@ -34,6 +34,7 @@
   "current_employer": "Example Corp",
   "city_state": "Austin, TX",
   "primary_language": "Python (FastAPI)",
+  "outreach_sender_email": "you.builds@gmail.com",
   "work_countries": [
     "US"
   ],

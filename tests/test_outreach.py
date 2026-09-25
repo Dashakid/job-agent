@@ -1274,3 +1274,16 @@ class ConfidenceOrderedReviewTests(unittest.TestCase):
         self.assertEqual([company for company, _, _ in seen], ["High Co", "Low Co", "Chain Co"])
         self.assertEqual(seen[2][1], "national chain")
         self.assertIn("https://high.com", seen[0][2])
+
+
+class SenderAccountTests(unittest.TestCase):
+    def test_gmail_link_opens_in_the_outreach_account(self):
+        url, _ = outreach_agent.build_outreach_url(
+            {"channel": "email", "email": "info@acme.com"}, "hi", sender_email="me.builds@gmail.com")
+        self.assertIn("authuser=me.builds%40gmail.com", url)
+        self.assertIn("to=info%40acme.com", url)
+
+    def test_no_sender_leaves_gmail_default_account(self):
+        url, _ = outreach_agent.build_outreach_url(
+            {"channel": "email", "email": "info@acme.com"}, "hi", sender_email="")
+        self.assertNotIn("authuser", url)

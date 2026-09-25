@@ -12,6 +12,8 @@ Subcommands:
     outreach-mark-sent            Record a human-confirmed outreach send
     outreach-sync-sheet            Push the outreach SQLite log to Google Sheets
     find-leads                   Find small businesses with fixable website gaps (lead_finder.py)
+    review-ui                    Review outreach drafts in a local web page (review_ui.py)
+    sync-replies                 Mark contacts who replied (read-only Gmail) and draft due follow-ups
 
 Examples:
     python cli.py apply --url "https://jobs.ashbyhq.com/..."
@@ -23,6 +25,7 @@ Examples:
     python cli.py outreach-run --draft-only && python cli.py outreach-review
     python cli.py find-leads --category accountants --area "Tampa, FL"
     python cli.py outreach-run --targets queues/smb_targets.json --output queues/smb_outreach.db
+    python cli.py review-ui --targets queues/smb_targets.json --output queues/smb_outreach.db
 """
 
 import argparse
@@ -167,6 +170,18 @@ def cmd_find_leads(args: argparse.Namespace) -> int:
     return run_find_leads(args)
 
 
+def cmd_review_ui(args: argparse.Namespace) -> int:
+    from review_ui import cmd_review_ui as run_review_ui
+
+    return run_review_ui(args)
+
+
+def cmd_sync_replies(args: argparse.Namespace) -> int:
+    from followups import cmd_sync_replies as run_sync_replies
+
+    return run_sync_replies(args)
+
+
 def build_parser() -> argparse.ArgumentParser:
     from outreach_agent import (
         DEFAULT_DB_PATH, DEFAULT_MIN_INTERVAL_SECONDS, DEFAULT_TARGETS_PATH, DEFAULT_USER_DATA_DIR,
@@ -180,7 +195,7 @@ def build_parser() -> argparse.ArgumentParser:
         dest="command", required=True,
         metavar=(
             "{apply,sync-email,sync-sheets,sync-all,batch-run,review-batch,"
-            "outreach-run,outreach-review,outreach-mark-sent,outreach-sync-sheet,find-leads}"
+            "outreach-run,outreach-review,outreach-mark-sent,outreach-sync-sheet,find-leads,review-ui,sync-replies}"
         ),
     )
 
@@ -258,6 +273,21 @@ def build_parser() -> argparse.ArgumentParser:
     )
     add_find_leads_arguments(find_leads_parser)
     find_leads_parser.set_defaults(func=cmd_find_leads)
+
+    from review_ui import add_arguments as add_review_ui_arguments
+
+    review_ui_parser = subparsers.add_parser(
+        "review-ui", help="Review outreach drafts in a local web page (never sends)"
+    )
+    add_review_ui_arguments(review_ui_parser)
+    review_ui_parser.set_defaults(func=cmd_review_ui)
+
+    sync_replies_parser = subparsers.add_parser(
+        "sync-replies", help="Mark contacts who replied (read-only Gmail) and draft due follow-ups"
+    )
+    sync_replies_parser.add_argument("--targets", type=Path, default=DEFAULT_TARGETS_PATH)
+    sync_replies_parser.add_argument("--output", type=Path, default=DEFAULT_DB_PATH)
+    sync_replies_parser.set_defaults(func=cmd_sync_replies)
 
     return parser
 
